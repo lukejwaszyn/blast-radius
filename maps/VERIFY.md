@@ -139,6 +139,7 @@ fx_tpch      tests/fixtures/optimizer/tpc-h/tpc-h.sql               2        61 
 
 ## Tracing runs
 
+- `tools/build_maps.sh` was run end to end a second time (10.6 minutes, 4 processes): every map came out byte-identical except `alone_seconds` in `tests.json`, which is a timing.
 - Lines pass and reads pass: all 1620 numbered tests (plus the one the official environment skips) passed in their forks, in both runs of each pass; no crashed test process.
 - The two lines-pass runs (PYTHONHASHSEED 0 and 1) recorded identical line sets for every test.
 - Build machine: macOS arm64, CPython 3.13.15, packages exactly as in the kit's `requirements.lock`. The scorer's image is linux/amd64 with a newer 3.13 patch release and an older SQLite; the only difference in the test list is the SQLite-dependent test that the official environment skips.

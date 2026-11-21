@@ -8,7 +8,7 @@
 # traces (about 250 MB) and an instrumented copy of the checkout; it can be deleted
 # afterwards.  JOBS (default 4) is the number of test files traced at once.
 #
-# About 12 minutes on a laptop with JOBS=4.  Each tracing pass runs twice (hash
+# About 11 minutes on a laptop with JOBS=4.  Each tracing pass runs twice (hash
 # seeds 0 and 1) and the runs are united.
 set -eu
 SRC=$1
