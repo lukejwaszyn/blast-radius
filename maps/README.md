@@ -213,7 +213,7 @@ module is already imported then runs the "class not registered" branch of
 `Dialect._try_load`, which no test executes alone.
 
 `tools/warm_trace.py` runs the whole suite in **one** process under the same line
-tracer, in several orders (collection order, reversed, two shuffles), and keeps
+tracer, in eight orders (collection order, reversed, six shuffles; the last four found no new line), and keeps
 every (line, test) pair that `cov.json` and `filecov.json` do not have.
 `lines[path][line]` → index into `sets`: the tests seen on that line in any of
 the runs **united with every test that executes the enclosing function alone**

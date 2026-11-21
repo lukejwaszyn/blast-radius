@@ -2,7 +2,7 @@
 """Lines a test can execute only because of what earlier tests left behind -> maps/warm.json.
 
     python tools/warm_trace.py --src <checkout> --python <python with the lock> --work <dir> --maps maps \
-        [--orders forward reverse shuffle:1 shuffle:2] [--reuse]
+        [--orders forward reverse shuffle:1 ... shuffle:6] [--reuse]
 
 cov.json records each test alone (a fork per test).  In a real run tests share a
 process: `tests/test_dialect_entry_points.py` clears the dialect registry in its
@@ -78,7 +78,7 @@ def main() -> None:
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--work", required=True)
     ap.add_argument("--maps", required=True)
-    ap.add_argument("--orders", nargs="+", default=["forward", "reverse", "shuffle:1", "shuffle:2"])
+    ap.add_argument("--orders", nargs="+", default=["forward", "reverse"] + [f"shuffle:{i}" for i in range(1, 7)])
     ap.add_argument("--reuse", action="store_true", help="use the traces already in --work")
     args = ap.parse_args()
     src = os.path.realpath(args.src)

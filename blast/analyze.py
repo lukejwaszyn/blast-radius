@@ -184,6 +184,28 @@ class Analyzer:
                 mask = maps.all_mask
             an.add(p, mask, f"{path}: {why}: tests that open the file")
 
+    def same_code_besides_docstrings(self, old_tree, new_tree) -> bool:
+        """Equal trees once docstrings are taken out -- provided maps/reads.json shows that no test
+        reads any `__doc__` of sqlglot (otherwise a docstring is data like any other)."""
+        if any(name.endswith("|__doc__") for name in self.maps.load("reads")["reads"]):
+            return ast.dump(old_tree) == ast.dump(new_tree)
+
+        def strip(tree):
+            # a string that stands alone as a statement: a docstring when it comes first in a module,
+            # class or function, and nothing at all anywhere else ("attribute docstrings")
+            for node in ast.walk(tree):
+                for field in ("body", "orelse", "finalbody"):
+                    body = getattr(node, field, None)
+                    if isinstance(body, list):
+                        for i, stmt in enumerate(body):
+                            if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
+                                body[i] = ast.Pass()
+            return ast.dump(tree)
+
+        import copy
+
+        return strip(copy.deepcopy(old_tree)) == strip(copy.deepcopy(new_tree))
+
     def test_dependents(self, path: str) -> int:
         """Tests that depend on a Python file of the test tree beyond what line coverage says: the
         tests it defines and, for a package marker or a conftest.py, every test below its directory
@@ -435,9 +457,12 @@ class Analyzer:
         diff = diff_python(old_text, applied, self.src.ast_cache, path, filename=path)
         readers = maps.text_reader_tests(path)
         new_text = applied.new_text()
-        if not diff.broken and not new_text.isascii() and declared_encoding(old_text) != declared_encoding(new_text):
+        if not diff.broken and not new_text.isascii() and declared_encoding(old_text) != declared_encoding(new_text) \
+                and not (diff.same_ast and self.same_code_besides_docstrings(diff.old_tree, diff.new_tree)):
             # Every non-ASCII literal of the file now decodes differently, also in statements the
             # hunks do not touch (those are otherwise taken as unchanged without being compared).
+            # (When nothing else changed and the two whole trees are equal, the non-ASCII text sits
+            # in comments -- or in docstrings, which no test reads -- and nothing is different.)
             an.notes.append(f"{path}: source encoding declaration changed and the file holds non-ASCII text")
             if cat == "src":
                 module = maps.module_of(path) or ""

@@ -116,7 +116,7 @@ class GeneralizationTests(unittest.TestCase):
         _, sel = self.run_patch(patch("tests/__init__.py", "", "def broken(:\n"))
         self.assertEqual(len(sel), self.maps.n)
         _, sel = self.run_patch(patch("tests/dialects/__init__.py", "", "raise RuntimeError('boom')\n"))
-        self.assertGreaterEqual(sel, self.files_tests(lambda f: f.startswith("tests/dialects/")))
+        self.assertTrue(sel >= self.files_tests(lambda f: f.startswith("tests/dialects/")))
         # a comment there still selects nothing
         _, sel = self.run_patch(patch("tests/__init__.py", "", "# the test package\n"))
         self.assertEqual(sel, set())
@@ -138,7 +138,7 @@ class GeneralizationTests(unittest.TestCase):
         files = self.importers("sqlglot", "to_table")
         self.assertTrue(files)
         an, sel = self.run_patch(edit("sqlglot/__init__.py", "    to_table as to_table,\n", ""))
-        self.assertGreaterEqual(sel, self.files_tests(lambda f: f in files))
+        self.assertTrue(sel >= self.files_tests(lambda f: f in files))
         self.assertLess(len(sel), 400)      # ... and not everything that mentions the word
 
     def test_name_users_resolves_aliases_and_string_targets(self):
@@ -174,7 +174,7 @@ class GeneralizationTests(unittest.TestCase):
         lo, hi = next((sc[2], sc[3]) for sc in st["scopes"] if sc[0] == "DependencyNode")
         ran_the_class = set(bits(self.maps.line_tests(rel, lo, hi)))
         self.assertTrue(ran_the_class)
-        self.assertGreaterEqual(sel, ran_the_class)
+        self.assertTrue(sel >= ran_the_class)
         # a field of a @dataclass: its default goes into the generated __init__, nobody loads it by name
         rel = "sqlglot/lineage.py"
         old = read(rel)
@@ -187,21 +187,49 @@ class GeneralizationTests(unittest.TestCase):
         an, sel = self.run_patch(patch(rel, old, "\n".join(lines)))
         users = set(bits(self.maps.line_tests(rel, cls.lineno, cls.end_lineno)))
         self.assertTrue(users)
-        self.assertGreaterEqual(sel, users)
+        self.assertTrue(sel >= users)
 
     # ---- source encoding ----------------------------------------------------------
+    def non_ascii_literals(self, rel):
+        """(strings used as values, strings that stand alone as statements) holding non-ASCII text."""
+        tree = ast.parse(read(rel))
+        alone = set()
+        for n in ast.walk(tree):
+            for field in ("body", "orelse", "finalbody"):
+                stmts = getattr(n, field, None)
+                if isinstance(stmts, list):
+                    alone |= {id(s.value) for s in stmts if isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant)}
+        used = docs = 0
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and not node.value.isascii():
+                if id(node) in alone:
+                    docs += 1
+                else:
+                    used += 1
+        return used, docs
+
     def test_coding_cookie_on_a_file_with_non_ascii_text_is_a_change_of_the_whole_file(self):
-        rel = next(r for r in self.az.src.python_files() if r.startswith("sqlglot/") and not read(r).isascii())
-        old = read(rel)
-        an, sel = self.run_patch(patch(rel, old, "# -*- coding: latin-1 -*-\n" + old))
-        module = self.maps.module_of(rel)
-        self.assertGreaterEqual(sel, set(bits(self.maps.module_tests(module))))
+        files = [r for r in self.az.src.python_files() if r.startswith(("sqlglot/", "tests/test_")) and not read(r).isascii()]
+        with_literals = next(r for r in files if self.non_ascii_literals(r)[0])
+        comments_only = next(r for r in files if r.startswith("sqlglot/") and self.non_ascii_literals(r)[0] == 0)
+        # a non-ASCII string literal now decodes to other characters, in a statement the hunk does not touch
+        old = read(with_literals)
+        _, sel = self.run_patch(patch(with_literals, old, "# -*- coding: latin-1 -*-\n" + old))
+        if with_literals.startswith("sqlglot/"):
+            affected = set(bits(self.maps.module_tests(self.maps.module_of(with_literals))))
+        else:
+            affected = set(bits(self.maps.tests_in_file(with_literals)))
+        self.assertTrue(affected and sel >= affected)
+        # non-ASCII text only in comments and in strings that stand alone as statements: nothing executes differently
+        old = read(comments_only)
+        _, sel = self.run_patch(patch(comments_only, old, "# -*- coding: latin-1 -*-\n" + old))
+        self.assertEqual(len(sel), 0)
         # the same cookie on a pure-ASCII file decodes to the same text: nothing
         rel = "sqlglot/trie.py"
         old = read(rel)
         self.assertTrue(old.isascii())
         _, sel = self.run_patch(patch(rel, old, "# -*- coding: latin-1 -*-\n" + old))
-        self.assertEqual(sel, set())
+        self.assertEqual(len(sel), 0)
 
     # ---- state left behind by other tests -------------------------------------------
     def test_branch_reached_only_after_another_test_cleared_the_registry(self):
@@ -224,7 +252,7 @@ class GeneralizationTests(unittest.TestCase):
         target = loop.body[0]                               # attr = getattr(module, attr_name, None)
         text = old.split("\n")[target.lineno - 1]
         an, sel = self.run_patch(edit(rel, text + "\n", text.replace("None", "False") + "\n"))
-        self.assertGreaterEqual(sel, reach_guard)
+        self.assertTrue(sel >= reach_guard)
 
     # ---- import of the patched tree -----------------------------------------------
     def test_fatal_import_result_selects_everything(self):
