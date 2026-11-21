@@ -1,0 +1,6 @@
+.git
+sample
+unit
+output.jsonl
+**/__pycache__
+*.pyc
