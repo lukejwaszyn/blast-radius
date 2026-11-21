@@ -51,6 +51,7 @@ class PyDiff:
         self.same_ast = False
         self.marks: list[Mark] = []
         self.future_annotations = False
+        self.no_op_changes = False  # docstrings / `pass` added or removed inside functions
         self.old_tree: ast.Module | None = None
         self.new_tree: ast.Module | None = None
 
@@ -176,6 +177,10 @@ def _sites(a, b, trail, out):
             return
 
 
+def _no_op(stmt) -> bool:
+    return isinstance(stmt, ast.Pass) or (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant))
+
+
 def _constantish(node) -> bool:
     if isinstance(node, ast.Constant):
         return True
@@ -291,6 +296,8 @@ class _Walker:
             ops = [("replace", 0, 1, 0, 1)]
         else:
             ops = difflib.SequenceMatcher(None, mo, mn, autojunk=False).get_opcodes()
+        gone: list = []      # statements of the old body with no counterpart
+        fresh: list = []     # (statement of the new body with no counterpart, anchors)
         for tag, i1, i2, j1, j2 in ops:
             if tag == "equal":
                 for d in range(i2 - i1):
@@ -300,11 +307,37 @@ class _Walker:
                 for d in range(i2 - i1):
                     self.stmt(old[lo + i1 + d], new[lo + j1 + d], ctx)
             else:
-                for i in range(i1, i2):
-                    self.deleted(old[lo + i], ctx)
+                gone.extend(old[lo + i] for i in range(i1, i2))
                 anchors = self._anchors(old, lo + i1 - 1, lo + i2, parent)
-                for j in range(j1, j2):
-                    self.inserted(new[lo + j], anchors, ctx)
+                fresh.extend((new[lo + j], anchors) for j in range(j1, j2))
+        if ctx.in_func:
+            # a bare constant (a docstring) or `pass` executes nothing
+            if any(_no_op(o) for o in gone) or any(_no_op(n) for n, _ in fresh):
+                self.res.no_op_changes = True
+            gone = [o for o in gone if not _no_op(o)]
+            fresh = [(n, a) for n, a in fresh if not _no_op(n)]
+        elif gone and fresh:
+            # the same definition-time statement at another place of the body: moved, not changed
+            dumps = {}
+            for n, a in fresh:
+                dumps.setdefault(ast.dump(n), []).append((n, a))
+            still_gone = []
+            for o in gone:
+                twins = dumps.get(ast.dump(o)) if type(o).__name__ in {type(n).__name__ for n, _ in fresh} else None
+                if twins:
+                    n, _a = twins.pop()
+                    fresh = [(x, a) for x, a in fresh if x is not n]
+                    self.mark("moved", first_line(o), o.end_lineno, ctx.scope, names=sorted(set(bound_names([o]))),
+                              is_def=isinstance(o, _FUNC + (ast.ClassDef,)),
+                              is_import=isinstance(o, (ast.Import, ast.ImportFrom)))
+                    self.to_compile.append(n)
+                else:
+                    still_gone.append(o)
+            gone = still_gone
+        for o in gone:
+            self.deleted(o, ctx)
+        for n, anchors in fresh:
+            self.inserted(n, anchors, ctx)
 
     @staticmethod
     def _anchors(old, prev_index, next_index, parent):
@@ -587,7 +620,7 @@ def diff_python(old_text: str, applied: Applied, cache: dict | None = None, key=
     walker = _Walker(applied, res)
     walker.body(old_tree.body, new_tree.body, _Ctx("", False, ""))
     if not res.marks and not walker.to_compile:
-        res.same_ast = True
+        res.same_ast = not res.no_op_changes
         return res
     # errors the parser accepts and the compiler refuses (`return` at class level,
     # `break` outside a loop, duplicate argument names ...): compile what changed

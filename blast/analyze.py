@@ -434,6 +434,10 @@ class Analyzer:
             an.notes.append(f"{path}: comments / blank lines / layout only (same AST)")
             an.add(C.P_TEXT_READER_COMMENT, readers, f"{path}: read as text by these tests; only comments changed")
             return
+        if not diff.marks:
+            an.notes.append(f"{path}: only docstrings / `pass` statements inside functions changed")
+            an.add(C.P_TEXT_READER_COMMENT, readers, f"{path}: read as text by these tests; only docstrings changed")
+            return
         an.add(C.P_TEXT_READER_CODE, readers, f"{path}: these tests read the file as text or run it by path")
         if cat == "src":
             ctx = _SrcFile(self, an, path, old_text, applied, diff)
@@ -444,6 +448,7 @@ class Analyzer:
             ctx = _TestFile(self, an, path, old_text, applied, diff)
             for mark in diff.marks:
                 ctx.mark(mark)
+            ctx.finish()
         else:
             an.notes.append(f"{path}: Python file no test executes")
 
@@ -470,7 +475,7 @@ class Analyzer:
                         def_time_modules.add(maps.module_of(rel) or "")
         return mask, def_time_modules
 
-    def local_mentions(self, path: str, old_text: str, name: str, skip_range=None) -> tuple[int, bool]:
+    def local_mentions(self, path: str, old_text: str, name: str, skip_range=None, skip_ranges=()) -> tuple[int, bool]:
         """Tests executing lines of this file that mention `name`; and whether a definition-time line does."""
         maps = self.maps
         pattern = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])")
@@ -478,6 +483,8 @@ class Analyzer:
         def_time = False
         for number, line in enumerate(old_text.split("\n"), 1):
             if skip_range and skip_range[0] <= number <= skip_range[1]:
+                continue
+            if any(lo <= number <= hi for lo, hi in skip_ranges):
                 continue
             if name in line and pattern.search(line) and not line.lstrip().startswith("#"):
                 mask |= maps.line_tests(path, number, number)
@@ -540,6 +547,30 @@ class _FileCtx:
         self.applied = applied
         self.diff = diff
         self.module = self.maps.module_of(path) or ""
+        self.import_marks: list[Mark] = []
+
+    def net_imports(self):
+        """Import statements that were changed, added or removed, netted per scope: reordering
+        imports or splitting one statement in two binds the same names to the same things."""
+        by_scope: dict[str, list[Mark]] = {}
+        for m in self.import_marks:
+            by_scope.setdefault(m.scope, []).append(m)
+        out = []
+        for scope, marks in by_scope.items():
+            old: dict = {}
+            new: dict = {}
+            for m in marks:
+                old.update(m.info["old"])
+                new.update(m.info["new"])
+            ranges = [(m.lo, m.hi) for m in marks if m.lo]
+            anchors = [a for m in marks for a in m.info.get("anchors", ())]
+            out.append({
+                "scope": scope, "old": old, "new": new, "ranges": ranges, "anchors": anchors,
+                "removed": sorted(k for k in old if k not in new),
+                "added": sorted(k for k in new if k not in old),
+                "rebound": sorted(k for k in old if k in new and old[k] != new[k]),
+            })
+        return out
 
     def old_def(self, scope: str, name: str):
         """(first body line, last line) of the def `name` directly in class `scope` of the old file."""
@@ -618,14 +649,14 @@ class _TestFile(_FileCtx):
                     an.add(C.P_TEST_FILE_LEVEL, self.lines(m.lo, m.hi) or self.maps.tests_in_file(path),
                            f"{path}:{m.lo}-{m.hi}: module/class-level statement changed: tests of the files whose import runs it")
         elif kind == "import":
-            if m.info["op"] == "insert":
-                an.add(C.P_TEST_FILE_LEVEL, self.anchors(m), f"{path}: new import; the file may no longer import")
+            self.import_marks.append(m)
+        elif kind == "moved":
+            if m.info["is_def"] or m.info.get("is_import"):
+                an.add(C.P_NEW_TEST, self.lines(m.lo, m.hi) or self.maps.tests_in_file(path),
+                       f"{path}: a def, class or import moved inside its file")
             else:
-                an.add(C.P_TEST_FILE_LEVEL, self.lines(m.lo, m.hi) or self.maps.tests_in_file(path),
-                       f"{path}:{m.lo}: import changed: tests of the files whose import runs it")
-                for name in m.info["removed"] + m.info["rebound"]:
-                    mask, _ = self.az.local_mentions(path, self.old_text, name)
-                    an.add(C.P_TEST_FILE_LEVEL, mask, f"{path}: tests executing lines that mention `{name}`")
+                an.add(C.P_TEST_FILE_LEVEL, self.maps.import_tests(path, m.lo, m.hi) or self.maps.tests_in_file(path),
+                       f"{path}: a module/class-level statement moved; later statements may depend on it")
         elif kind == "defhdr":
             lo, hi = m.info["body"]
             if not (m.info["annotations_only"] and self.diff.future_annotations):
@@ -653,6 +684,24 @@ class _TestFile(_FileCtx):
             an.add(C.P_TEST_FILE_LEVEL, mask or self.maps.tests_in_file(path), f"{path}: module/class-level block changed")
         else:
             an.add(C.P_TEST_FILE_LEVEL, self.maps.tests_in_file(path) | self.maps.file_line_tests(path), f"{path}: {m.info.get('why', kind)}")
+
+    def finish(self):
+        an, path = self.an, self.path
+        for net in self.net_imports():
+            if not (net["removed"] or net["added"] or net["rebound"]):
+                an.notes.append(f"{path}: imports reordered or regrouped, same bindings")
+                continue
+            mask = 0
+            for lo, hi in net["ranges"]:
+                mask |= self.lines(lo, hi)
+            for lo, hi in net["anchors"]:
+                mask |= self.maps.import_tests(path, lo, lo) | self.maps.import_tests(path, hi, hi)
+            an.add(C.P_TEST_FILE_LEVEL, mask or self.maps.tests_in_file(path),
+                   f"{path}: imports changed ({', '.join(net['removed'] + net['added'] + net['rebound'])}): "
+                   "tests of the files whose import runs them")
+            for name in net["removed"] + net["rebound"]:
+                used, _ = self.az.local_mentions(path, self.old_text, name, skip_ranges=net["ranges"])
+                an.add(C.P_TEST_FILE_LEVEL, used, f"{path}: tests executing lines that mention `{name}`")
 
     def name_gone(self, name: str, own_range):
         mask, _ = self.az.local_mentions(self.path, self.old_text, name, own_range)
@@ -729,7 +778,11 @@ class _SrcFile(_FileCtx):
         elif kind == "value":
             self.value(m)
         elif kind == "import":
-            self.import_(m)
+            self.import_marks.append(m)
+        elif kind == "moved":
+            # same statement, other position: values and imports are checked by importing the tree
+            self.exact(f"{path}:{m.lo}: definition-time statement moved")
+            self.unconfined("a module/class-level statement moved", fallback_only=True)
         elif kind == "defhdr":
             lo, hi = m.info["body"]
             if m.info["annotations_only"] and self.diff.future_annotations:
@@ -882,30 +935,30 @@ class _SrcFile(_FileCtx):
             self.an.add(C.P_VALUE_DERIVED, mask, f"{why}: readers of values derived from it at import")
 
     # ------------------------------------------------------------ imports
-    def import_(self, m: Mark):
+    def import_(self, net: dict):
         an, maps, path = self.an, self.maps, self.path
-        info = m.info
-        self.exact(f"{path}: import statement {info['op']}")
-        gone = list(info["removed"]) + list(info["rebound"])
-        if info["op"] == "insert":
-            # a new import can take over a name the module already uses (a builtin, another import)
-            taken = set(self.old_scope_names(m.scope))
-            gone += [n for n in info["added"] if n in taken]
-        else:
-            gone += [n for n in info["added"] if n in self.old_scope_names(m.scope)]
+        self.exact(f"{path}: import statements changed")
+        if not (net["removed"] or net["added"] or net["rebound"]):
+            an.notes.append(f"{path}: imports reordered or regrouped, same bindings")
+            return
+        scope = net["scope"]
+        gone = list(net["removed"]) + list(net["rebound"])
+        # a new import can take over a name the module already uses (a builtin, another binding)
+        taken = set(self.old_scope_names(scope))
+        gone += [n for n in net["added"] if n in taken]
         def_time_user = False
         for name in sorted(set(gone)):
-            mask, at_def = self.az.local_mentions(path, self.old_text, name, (m.lo, m.hi) if m.lo else None)
+            mask, at_def = self.az.local_mentions(path, self.old_text, name, skip_ranges=net["ranges"])
             an.add(C.P_IMPORT_REBIND, mask, f"{path}: import of `{name}` changed: tests executing lines that mention it")
             def_time_user = def_time_user or at_def
-            if not m.scope and name in info["removed"]:
+            if not scope and name in net["removed"]:
                 # other modules may import the name from here
                 self.reexport_gone(name)
-        broken = self.import_resolves(info["new"]) if info["new"] else None
+        broken = self.import_resolves(net["new"]) if net["new"] else None
         if broken:
             an.add(C.P_MODULE_BROKEN, maps.module_tests(self.module) | maps.file_line_tests(path),
                    f"{path}: {broken}: every test that loads the module")
-        elif def_time_user or info["added"] or info["rebound"]:
+        elif def_time_user or net["added"] or net["rebound"]:
             self.unconfined("import statement changed and the module may fail to import", fallback_only=True)
 
     def import_resolves(self, bindings: dict) -> str | None:
@@ -1027,7 +1080,8 @@ class _SrcFile(_FileCtx):
             an.add(C.P_NEW_NAME, class_tests, f"{path}: new method {scope}.{name}, nothing refers to it")
 
     def finish(self):
-        pass
+        for net in self.net_imports():
+            self.import_(net)
 
 
 def spell_keys(nodes) -> list[str] | None:

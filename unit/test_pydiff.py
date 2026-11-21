@@ -182,6 +182,30 @@ class PyDiffTests(unittest.TestCase):
             d = diff(BASE, new) if what != "encoding" else diff_python(textwrap.dedent(BASE), applied(textwrap.dedent(BASE), new))
             self.assertIsNotNone(d.broken, what)
 
+    def test_docstrings_and_pass_inside_functions_execute_nothing(self):
+        d = diff(BASE, BASE.replace("        def other(self, x, y):\n", '        def other(self, x, y):\n            """Adds."""\n'))
+        self.assertEqual(d.marks, [])
+        self.assertFalse(d.same_ast)          # the tree did change ...
+        self.assertTrue(d.no_op_changes)      # ... by statements that execute nothing
+        d = diff(BASE, BASE.replace('            """Doc."""\n', ""))
+        self.assertEqual(d.marks, [])
+        d = diff(BASE, BASE.replace("            return x + y", "            pass\n            return x + y"))
+        self.assertEqual(d.marks, [])
+
+    def test_moved_definition_is_not_a_removal_plus_an_addition(self):
+        method = "        def method(self, x):"
+        other = "        def other(self, x, y):\n            return x + y\n"
+        moved = BASE.replace("\n\n" + other, "").replace(method, other + "\n" + method)
+        d = diff(BASE, moved)
+        self.assertEqual([(m.kind, m.info["names"], m.info["is_def"]) for m in d.marks], [("moved", ["other"], True)])
+        swapped = BASE.replace("    import os\n    from helper import seq_get\n", "    from helper import seq_get\n    import os\n")
+        d = diff(BASE, swapped)
+        self.assertEqual([(m.kind, m.info["is_import"]) for m in d.marks], [("moved", True)])
+        # inside a function the order of statements is behaviour
+        body = BASE.replace("            return x + y", "            a = x\n            b = y\n            return a + b")
+        d = diff(body, body.replace("            a = x\n            b = y\n", "            b = y\n            a = x\n"))
+        self.assertTrue(d.marks and all(m.kind == "call" for m in d.marks))
+
     def test_untouched_statements_are_not_compared(self):
         # a 3000-statement module with one changed line: only that statement is dumped
         big = "".join(f"V{i} = {i}\n" for i in range(3000))

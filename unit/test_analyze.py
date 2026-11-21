@@ -124,6 +124,35 @@ class AnalyzeTests(unittest.TestCase):
         self.assertEqual(self.run_patch(b"diff --git a/sqlglot/trie.py b/sqlglot/trie.py\nold mode 100644\nnew mode 100755\n")[1], set())
         self.assertEqual(self.run_patch(b"")[1], set())
 
+    def test_refactors_that_bind_the_same_things_select_nothing_statically(self):
+        rel = "sqlglot/optimizer/eliminate_joins.py"
+        one = "from sqlglot.optimizer.scope import Scope, find_in_scope, traverse_scope\n"
+        an, sel = self.run_patch(edit(rel, one, "from sqlglot.optimizer.scope import Scope\nfrom sqlglot.optimizer.scope import find_in_scope, traverse_scope\n"),
+                                 with_fallback=False)
+        self.assertEqual(sel, set())
+        self.assertIsNotNone(an.exact)       # the import of the patched tree still checks that it imports
+        an, sel = self.run_patch(edit(rel, "from sqlglot.optimizer.normalize import normalized\n" + one,
+                                      one + "from sqlglot.optimizer.normalize import normalized\n"), with_fallback=False)
+        self.assertEqual(sel, set())
+        an, sel = self.run_patch(edit("sqlglot/generators/drill.py", "    def ilike_sql(self, expression: exp.ILike) -> str:\n",
+                                      '    def ilike_sql(self, expression: exp.ILike) -> str:\n        """Render ILIKE."""\n'))
+        self.assertEqual(sel, set())
+        self.assertIsNone(an.exact)
+
+    def test_broken_import_selects_the_tests_that_load_the_module(self):
+        rel = "sqlglot/optimizer/eliminate_joins.py"
+        an, sel = self.run_patch(edit(rel, "from sqlglot.optimizer.normalize import normalized", "from sqlglot.optimizer.normalize import normalised"),
+                                 with_fallback=False)
+        self.assertEqual(sel, set(bits(self.maps.module_tests("sqlglot.optimizer.eliminate_joins"))))
+
+    def test_one_line_lambda_in_a_table_is_found_through_function_entry(self):
+        # the lambda's whole body is on its first line: only the entry event records its callers
+        an, sel = self.run_patch(edit("sqlglot/generators/teradata.py", 'exp.Use: lambda self, e: f"DATABASE {self.sql(e, \'this\')}",',
+                                      'exp.Use: lambda self, e: f"SCHEMA {self.sql(e, \'this\')}",'))
+        self.assertTrue(sel)
+        self.assertTrue(all(i.startswith("tests/dialects/test_teradata.py") for i in self.ids(sel)))
+        self.assertIsNone(an.exact)
+
     def test_pytest_configuration(self):
         old = read("pyproject.toml")
         self.assertEqual(self.run_patch(patch("pyproject.toml", old, old.replace("easily", "very easily", 1)))[1], set())
