@@ -112,6 +112,7 @@ class Run:
         for an in analyses:
             if an.exact is not None and an not in waiting:
                 an.groups.extend(an.exact.fallback)
+                an.exact_done = True
                 if an.exact.fallback:
                     an.notes.append("definition-time change: static closure used (no import of the patched tree)")
         running: list[exact.Job] = []
@@ -120,26 +121,34 @@ class Run:
                 an = waiting.pop(0)
                 if self.elapsed() > C.WALL_BUDGET_S:
                     an.groups.extend(an.exact.fallback)
-                    an.notes.append("out of time: static closure used instead of importing the patched tree")
+                    self.import_failed(an, "out of time: the patched tree was not imported")
+                    an.exact_done = True
                     continue
                 try:
                     running.append(exact.start(an))
                 except Exception as exc:
                     an.groups.extend(an.exact.fallback)
                     self.import_failed(an, f"could not start the import of the patched tree ({exc})")
+                    an.exact_done = True
             if not running:
                 continue
             job = running.pop(0)
             exact.finish(job, C.SNAPSHOT_TIMEOUT_S - (time.monotonic() - job.started))
             an = job.analysis
             if job.result is not None:
-                found = exact.groups_from(job, self.maps, Group, self.analyzer)
-                an.groups.extend(found)
-                an.notes.append(f"imported the patched tree: {len(job.result.get('changed', {}))} changed values, "
-                                f"{len(job.result.get('errors', {}))} modules that no longer import")
+                try:
+                    found = exact.groups_from(job, self.maps, Group, self.analyzer)
+                except Exception as exc:  # never let one odd answer cost a commit its candidates
+                    an.groups.extend(an.exact.fallback)
+                    self.import_failed(an, f"the import comparison could not be read ({type(exc).__name__}: {exc})")
+                else:
+                    an.groups.extend(found)
+                    an.notes.append(f"imported the patched tree: {len(job.result.get('changed', {}))} changed values, "
+                                    f"{len(job.result.get('errors', {}))} modules that no longer import")
             else:
                 an.groups.extend(an.exact.fallback)
                 self.import_failed(an, job.error or "no answer")
+            an.exact_done = True
 
     def import_failed(self, an: Analysis, why: str):
         """The patched tree could not be imported to the end (hang, crash): assume the touched modules are broken."""
@@ -188,8 +197,12 @@ def main() -> int:
     except Exception as exc:
         log(f"exact phase failed: {type(exc).__name__}: {exc}")
         for an in analyses:
-            if an.exact is not None:
+            if an.exact is not None and not getattr(an, "exact_done", False):
                 an.groups.extend(an.exact.fallback)
+                try:
+                    run.import_failed(an, "the import comparison did not run")
+                except Exception:
+                    an.add(C.P_INTERNAL_ERROR, run.maps.all_mask, "the import comparison did not run: run everything")
     out = []
     for an in analyses:
         try:
