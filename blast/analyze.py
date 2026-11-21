@@ -439,9 +439,17 @@ class Analyzer:
         if cat == "src":
             module = maps.module_of(path)
             if text is not None and module:
-                req = an.want_exact(f"new module {module}", const_only=True)
+                # Pinned code may already try to import it (sqlglot/__init__.py imports
+                # sqlglot._version inside try/except ImportError): importing the patched tree shows
+                # whether anything now fails or changes.  Never skipped to save time.
+                req = an.want_exact(f"new module {module}")
                 req.files[path] = text
-            an.notes.append(f"{path}: new module, nothing imports it at the pinned commit")
+                leaf = module.rsplit(".", 1)[-1]
+                mask, def_modules = self.mention_tests(leaf)
+                for user in def_modules:
+                    mask |= maps.module_tests(user)
+                an.fallback(C.P_MODULE_UNCONFINED, mask, f"{path}: new module; tests running code that mentions `{leaf}`")
+            an.notes.append(f"{path}: new module; the pinned tree is imported with it to see what picks it up")
             return
         if cat == "test":
             if base == "__init__.py":
@@ -529,6 +537,28 @@ class Analyzer:
                     if rel.startswith("sqlglot/") and not maps.in_function_body(rel, number):
                         def_time_modules.add(maps.module_of(rel) or "")
         return mask, def_time_modules
+
+    def warm_readers(self, name: str) -> int:
+        """Tests that can read the value `definer|ATTR` on a line they reach only through left-over
+        state (maps/warm.json).  maps/reads.json, like the coverage, describes each test alone, so
+        a load on such a line is in nobody's record: the line's candidates are taken for every
+        such line that spells the attribute."""
+        attr = name.rsplit("|", 1)[-1]
+        if not attr or attr.startswith("<"):
+            return 0
+        cache = self.__dict__.setdefault("_warm_text", None)
+        if cache is None:
+            cache = self.__dict__["_warm_text"] = []
+            for rel, line, mask in self.maps.warm_lines():
+                text = self.src.read(rel)
+                lines = text.split("\n") if text else []
+                cache.append((lines[line - 1] if 0 < line <= len(lines) else "", mask))
+        pattern = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(attr) + r"(?![A-Za-z0-9_])")
+        mask = 0
+        for text, tests in cache:
+            if attr in text and pattern.search(text):
+                mask |= tests
+        return mask
 
     # --------------------------------------------- who uses a module-level name
     def module_file(self, module: str) -> str | None:
@@ -1193,6 +1223,7 @@ class _SrcFile(_FileCtx):
             else:
                 an.add(C.P_VALUE_READ, by_key, f"{why}: tests that looked up {keys} in {name}")
                 an.add(C.P_VALUE_WHOLE, whole, f"{why}: tests that took {name} as a whole")
+            an.add(C.P_VALUE_WHOLE, self.az.warm_readers(name), f"{why}: tests that can read {name} on a line only left-over state leads to")
             self.changed_names.append((name, keys))
         self.static_closure(names, keys, why, fallback_only=True)
 
@@ -1252,11 +1283,28 @@ class _SrcFile(_FileCtx):
         scope = net["scope"]
         future = {k for side in ("old", "new") for k, v in net[side].items() if v[0] == "__future__"}
         if future & (set(net["removed"]) | set(net["added"])):
-            # `from __future__ import annotations` (or another feature) switched on or off: the whole
-            # file compiles differently.  With annotations no longer deferred, a def nested in a
-            # function evaluates its annotations when it runs, and may meet names that only exist
-            # for type checkers; module-level and class-level defs are covered by importing the tree.
-            an.add(C.P_IMPORT_REBIND, maps.file_line_tests(path), f"{path}: __future__ import changed: tests that execute code of the file")
+            # `from __future__ import ...` switched on or off: the whole file compiles differently.
+            if future == {"annotations"} and not (future & set(net["added"])):
+                # Annotations are no longer deferred.  Those of module-level and class-level defs are
+                # evaluated while the module is imported (the import of the patched tree shows a
+                # failure); those of locals are never evaluated; those of a def or class nested in a
+                # function are evaluated when that statement runs, and may name things that only
+                # exist for type checkers.
+                mask = 0
+                for outer in ast.walk(self.diff.old_tree):
+                    if isinstance(outer, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        for inner in ast.walk(outer):
+                            if inner is outer:
+                                continue
+                            if isinstance(inner, ast.ClassDef):
+                                mask |= maps.line_tests(path, inner.lineno, inner.end_lineno)
+                            elif isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
+                                    inner.returns is not None or any(
+                                        a.annotation is not None for a in ast.walk(inner.args) if isinstance(a, ast.arg))):
+                                mask |= maps.line_tests(path, inner.lineno, inner.body[0].lineno)
+                an.add(C.P_IMPORT_REBIND, mask, f"{path}: annotations no longer deferred: tests that run a nested def with annotations")
+            else:
+                an.add(C.P_IMPORT_REBIND, maps.file_line_tests(path), f"{path}: __future__ import changed: tests that execute code of the file")
             net = dict(net, removed=[n for n in net["removed"] if n not in future], added=[n for n in net["added"] if n not in future])
         gone = list(net["removed"]) + list(net["rebound"])
         # a new import can take over a name the module already uses (a builtin, another binding)

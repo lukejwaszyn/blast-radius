@@ -135,6 +135,15 @@ class Maps:
             mask |= self.warm_tests(rel, lo, hi)
         return mask
 
+    def warm_lines(self) -> list[tuple[str, int, int]]:
+        """[(file, line, tests)] of maps/warm.json."""
+        self.warm_tests("", 0, 0)
+        out = []
+        for rel, lines in self._warm["lines"].items():
+            for key, sid in lines.items():
+                out.append((rel, int(key), mask_of(self._warm["sets"][sid])))
+        return out
+
     def warm_tests(self, rel: str, lo: int, hi: int) -> int:
         """Tests that can reach a line of rel[lo..hi] only through state an earlier test left behind
         (maps/warm.json: lines seen in shared-process runs that no test executes alone)."""

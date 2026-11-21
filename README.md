@@ -27,8 +27,14 @@ modules it loaded and the files it opened.
 
 2. **Python files: compare the two syntax trees** (`blast/pydiff.py`).
    - Equal trees: only comments, blank lines or layout changed. Nothing can
-     run differently. (A "comment" inside a string, a changed encoding cookie
+     run differently. (A "comment" inside a string
      or a re-indented line are not equal trees and are treated as code.)
+     One comment is not a comment: a coding cookie
+     (`# -*- coding: latin-1 -*-`) changes how every non-ASCII literal of the
+     file is decoded, also in statements the hunks do not touch. If the
+     declared encoding changes and the file holds non-ASCII text outside
+     comments and stand-alone strings, every test that loads the module is
+     selected.
    - The new text does not compile (syntax, indentation, tabs, encoding,
      `return` at class level ...): the module cannot be imported, so every
      test that loads it fails (`maps/modules.json`).
@@ -47,6 +53,11 @@ modules it loaded and the files it opened.
    call-time code too: its line lists the tests that *called* it. (The maps
    record function entry as well as line events for exactly this case: a
    one-line lambda never produces a line event when called.)
+   Coverage is recorded for each test alone; `maps/warm.json` adds the few
+   lines that a test reaches only through state an earlier test left behind
+   (a test file clears the dialect registry in its `setUp`), found by
+   running the whole suite in one process in eight orders. For those lines
+   every test that runs the enclosing function is a candidate.
 
 4. **Definition-time code → who reads the value.** A class-level edit such as
    `WEEK_OFFSET = -1` is executed by every test that imports the module, and
@@ -63,6 +74,30 @@ modules it loaded and the files it opened.
    run. If the import cannot be done, the static closure over
    `maps/derive.json` is used instead; it is sound and much coarser.
 
+   `reads.json` only knows names that are bound by an assignment and loaded
+   by name. An empty answer for anything else does not mean "nobody uses
+   it", so those are handled from the source:
+   - a name bound by an **import** (a re-export such as `sqlglot.to_table`)
+     that is removed or now names another object: the tests that execute a
+     `from module import name`, an `alias.name` whose alias is that module,
+     or a string `"pkg.module.name"` (mock.patch targets), followed through
+     modules that re-export it (`blast/analyze.py::name_users`). The import
+     comparison reports removed, rebound and added names separately; a
+     function whose body changed keeps its identity and is left to coverage;
+   - values the **interpreter consumes** without a load (`__slots__`,
+     `__match_args__`, `__hash__ = None`), and the body of a class that a
+     decorator or a special base turns into something else (`@dataclass`,
+     `NamedTuple`, `TypedDict`): the tests that used the class or ran a line
+     of it; `__all__`: the tests loading a file that star-imports the module;
+   - `from __future__ import annotations` removed: annotations of a def
+     nested in a function are evaluated when it runs, so the tests that run
+     such a def (module-level ones show up in the import comparison).
+
+   If `import sqlglot` itself fails in the patched tree (a new
+   `sqlglot/_version.py` that raises: `sqlglot/__init__.py` imports it inside
+   `try/except ImportError`), the comparison says so and every test is
+   selected; a new module is always checked this way.
+
    Edits that provably change nothing are recognised as such: a function
    whose old and new versions compile to the same bytecode (renamed locals,
    constants the compiler folds, annotations of locals) selects nothing;
@@ -78,6 +113,10 @@ modules it loaded and the files it opened.
    the tests of every file whose import executes it (so an edit to
    `tests/helpers.py` or to the `Validator` base class reaches its users). A
    new test function with a fresh name selects nothing: it has no number.
+   `tests/__init__.py` and `tests/dialects/__init__.py` are empty at the pinned
+   commit, so nothing has coverage in them; code added there (or a syntax
+   error) reaches every test below the package, because importing `tests.x`
+   runs them first.
 
 6. **Data files** → the tests that open them (`maps/opens.json`). For
    `tests/fixtures/**/*.sql` the selector applies the fixture loader's own

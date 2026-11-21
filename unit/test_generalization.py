@@ -254,6 +254,61 @@ class GeneralizationTests(unittest.TestCase):
         an, sel = self.run_patch(edit(rel, text + "\n", text.replace("None", "False") + "\n"))
         self.assertTrue(sel >= reach_guard)
 
+    def test_value_read_on_a_state_dependent_line_reaches_that_lines_candidates(self):
+        # PLUGIN_GROUP_NAME is loaded in the entry-point branch of Dialect._try_load; some tests get
+        # there only after another test emptied the registry, so the per-test read map lacks them
+        rel = "sqlglot/dialects/dialect.py"
+        old = read(rel).split("\n")
+        number = next(i for i, text in enumerate(old, 1) if "group=PLUGIN_GROUP_NAME" in text)
+        candidates = self.maps.warm_tests(rel, number, number)
+        self.assertTrue(candidates)
+        self.assertEqual(self.az.warm_readers("sqlglot.dialects.dialect:|PLUGIN_GROUP_NAME") & candidates, candidates)
+        self.assertEqual(self.az.warm_readers("sqlglot.dialects.dialect:|NO_SUCH_NAME"), 0)
+        assign = next(text for text in old if text.startswith("PLUGIN_GROUP_NAME = "))
+        an, sel = self.run_patch(edit(rel, assign, 'PLUGIN_GROUP_NAME = "sqlglot.other"'))
+        self.assertTrue(sel >= set(bits(candidates)))
+
+    # ---- __future__ imports ----------------------------------------------------------
+    def test_removed_future_annotations_reaches_nested_annotated_defs_only(self):
+        # which files have a def nested in a function that carries annotations?  Derived from the source.
+        def nested_annotated(rel):
+            tree = ast.parse(read(rel))
+            if not any(isinstance(n, ast.ImportFrom) and n.module == "__future__" for n in tree.body):
+                return None
+            lines = []
+            for outer in ast.walk(tree):
+                if isinstance(outer, ast.FunctionDef):
+                    for inner in ast.walk(outer):
+                        if inner is not outer and isinstance(inner, ast.FunctionDef) and (
+                                inner.returns is not None or any(a.annotation is not None for a in ast.walk(inner.args) if isinstance(a, ast.arg))):
+                            lines.append(inner.lineno)
+            return lines
+
+        files = {r: nested_annotated(r) for r in self.az.src.python_files() if r.startswith("sqlglot/") and "/" in r[8:]}
+        without = next(r for r, v in sorted(files.items()) if v == [] and self.maps.file_line_tests(r))
+        with_nested = next((r for r, v in sorted(files.items()) if v and any(self.maps.line_tests(r, n, n) for n in v)), None)
+        line = "from __future__ import annotations\n"
+        an, sel = self.run_patch(edit(without, line, ""))
+        self.assertEqual(len(sel), 0)             # statically nothing; the import of the patched tree decides the rest
+        self.assertIsNotNone(an.exact)
+        if with_nested:
+            an, sel = self.run_patch(edit(with_nested, line, ""))
+            want = set()
+            for n in files[with_nested]:
+                want |= set(bits(self.maps.line_tests(with_nested, n, n)))
+            self.assertTrue(want and sel >= want)
+
+    def test_new_module_is_always_checked_by_importing_the_tree(self):
+        an = self.az.analyze("t", new_file("sqlglot/_version.py", "__version__ = '1'\n"))
+        self.assertIsNotNone(an.exact)
+        self.assertFalse(an.exact.const_only)      # not skipped to save time
+        # without that import, the fallback is everything that runs code mentioning `_version`
+        # (sqlglot/__init__.py tries to import it, inside try/except ImportError)
+        mask = 0
+        for g in an.exact.fallback:
+            mask |= g.mask
+        self.assertGreaterEqual(len(bits(mask)), 1600)
+
     # ---- import of the patched tree -----------------------------------------------
     def test_fatal_import_result_selects_everything(self):
         class Job:

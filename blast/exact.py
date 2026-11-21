@@ -205,6 +205,10 @@ def groups_from(job: Job, maps, Group, analyzer=None) -> list:
                 if extra[0]:
                     out.append(Group(C.P_NAME_MENTION, extra[0], extra[1]))
                 continue
+        if analyzer is not None:
+            warm = analyzer.warm_readers(name)
+            if warm:
+                out.append(Group(C.P_VALUE_WHOLE, warm, f"exact: {name} changed: tests that can read it on a line only left-over state leads to"))
         if name.endswith("|<bases>"):
             mask = maps.class_users(name.split("|")[0])
             if mask:
