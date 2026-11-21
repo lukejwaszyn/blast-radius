@@ -42,7 +42,11 @@ modules it loaded and the files it opened.
    statement, because a changed operator in the middle of a multi-line
    condition changes which later lines are evaluated; only the header for an
    `if`/`for`/`while`/`with`). A pure insertion takes the tests that executed
-   the statements around it. A line no test executed selects nothing.
+   the statements around it. A line no test executed selects nothing. The body
+   of a lambda that sits in a class-level table (`"CHR": lambda args: ...`) is
+   call-time code too: its line lists the tests that *called* it. (The maps
+   record function entry as well as line events for exactly this case: a
+   one-line lambda never produces a line event when called.)
 
 4. **Definition-time code → who reads the value.** A class-level edit such as
    `WEEK_OFFSET = -1` is executed by every test that imports the module, and
@@ -58,6 +62,15 @@ modules it loaded and the files it opened.
    module that now fails to import is looked up in `modules.json`. No test is
    run. If the import cannot be done, the static closure over
    `maps/derive.json` is used instead; it is sound and much coarser.
+
+   Edits that provably change nothing are recognised as such: a function
+   whose old and new versions compile to the same bytecode (renamed locals,
+   constants the compiler folds, annotations of locals) selects nothing;
+   import statements are netted per scope (reordering or splitting them binds
+   the same names); a definition that reappears unchanged elsewhere in its
+   class or module is a move; a docstring or `pass` added inside a function
+   executes nothing. For the definition-time ones the import comparison still
+   runs.
 
 5. **Test files** are handled by the same two questions, because coverage was
    recorded for `tests/**` as well: a changed test body or helper selects the
@@ -103,7 +116,9 @@ always prints one line per commit.
 ## What it costs on the sample set
 
 `make sample`: **165.2 simulated seconds, 0 misses** on the 30 sample commits
-(94.4 s is the cost with perfect knowledge). CPU is about 2 s natively.
+(94.4 s is the cost with perfect knowledge). The static part takes about 0.3 s
+of CPU for the batch; each import comparison (4 of the 30 commits) about half
+a second more.
 
 | commits | selected / failing | note |
 | --- | --- | --- |
@@ -123,6 +138,11 @@ always prints one line per commit.
   two sample commits account for 46 of the 71 seconds above the optimum. The
   static method cannot tell these apart; running the cheap candidates at
   decision time could, at the price of CPU seconds.
+- **Tables that are consumed whole.** `Generator.TRANSFORMS` is copied into a
+  dispatch table and `Tokenizer.KEYWORDS` goes into the tokenizer core, so a
+  changed entry (other than the body of a lambda, which coverage answers)
+  selects every test that used that class, not only those that reach the
+  entry.
 - The maps were traced on macOS/arm64 with the kit's `requirements.lock`; the
   scorer is linux/amd64. Test ids and outcomes agree; a line executed only on
   one platform would be missed.
@@ -130,6 +150,8 @@ always prints one line per commit.
   (a polluted cache, a mutated global) is not modelled: tests are mapped as if
   each ran alone.
 - Timeouts are modelled only as "the tests that execute the changed code".
+- `test_generator_memory` asserts on allocation counts and is sensitive to
+  what ran before it in the same process; nothing here predicts that.
 - Deleted or renamed names are followed by word matching through the pinned
   tree, which over-selects for short common names.
 - `maps/opens.json` lists `test_execute_tpcds` as a consumer of `tpc-h.sql`

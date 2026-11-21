@@ -206,6 +206,26 @@ class PyDiffTests(unittest.TestCase):
         d = diff(body, body.replace("            a = x\n            b = y\n", "            b = y\n            a = x\n"))
         self.assertTrue(d.marks and all(m.kind == "call" for m in d.marks))
 
+    def test_same_bytecode_is_no_change(self):
+        src = BASE.replace("            return x + y", "            total = x + y\n            for i in (1, 2):\n                total += i * 60 * 60\n            return total")
+        renamed = src.replace("total", "acc").replace(" i ", " k ").replace("+= i", "+= k")
+        d = diff(src, renamed)
+        self.assertEqual(d.marks, [])
+        self.assertEqual(d.equivalent, ["Thing.other"])
+        self.assertFalse(d.same_ast)
+        self.assertEqual(diff(src, src.replace("(1, 2)", "(1, 1 + 1)")).marks, [])                 # folded by the compiler
+        self.assertEqual(diff(src, src.replace("total = x + y", "total: int = x + y")).marks, [])  # annotation of a local
+        # not equivalent: (i * 60) * 60 is not i * 3600 for the interpreter, another operator,
+        # another constant, swapped operands, a call added
+        for changed in (src.replace("i * 60 * 60", "i * 3600"), src.replace("total += i", "total -= i"),
+                        src.replace("(1, 2)", "(1, 3)"), src.replace("x + y", "y + x"), src.replace("x + y", "abs(x) + y")):
+            self.assertTrue(diff(src, changed).marks, changed)
+        d = diff(src, src.replace("def other(self, x, y):", "def other(self, a, y):").replace("total = x + y", "total = a + y"))
+        self.assertTrue(d.marks)
+        # a function that inspects its locals is never called equivalent
+        peek = src.replace("            return total", "            return locals()")
+        self.assertTrue(diff(peek, peek.replace("total", "acc")).marks)
+
     def test_untouched_statements_are_not_compared(self):
         # a 3000-statement module with one changed line: only that statement is dumped
         big = "".join(f"V{i} = {i}\n" for i in range(3000))

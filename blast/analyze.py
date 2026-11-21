@@ -434,8 +434,10 @@ class Analyzer:
             an.notes.append(f"{path}: comments / blank lines / layout only (same AST)")
             an.add(C.P_TEXT_READER_COMMENT, readers, f"{path}: read as text by these tests; only comments changed")
             return
+        for name in diff.equivalent:
+            an.notes.append(f"{path}: def {name} compiles to the same bytecode (only names of locals / layout of constants differ)")
         if not diff.marks:
-            an.notes.append(f"{path}: only docstrings / `pass` statements inside functions changed")
+            an.notes.append(f"{path}: nothing that executes changed (docstrings, `pass`, or equivalent bytecode)")
             an.add(C.P_TEXT_READER_COMMENT, readers, f"{path}: read as text by these tests; only docstrings changed")
             return
         an.add(C.P_TEXT_READER_CODE, readers, f"{path}: these tests read the file as text or run it by path")

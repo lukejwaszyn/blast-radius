@@ -52,6 +52,7 @@ class PyDiff:
         self.marks: list[Mark] = []
         self.future_annotations = False
         self.no_op_changes = False  # docstrings / `pass` added or removed inside functions
+        self.equivalent: list[str] = []  # functions whose bytecode is unchanged
         self.old_tree: ast.Module | None = None
         self.new_tree: ast.Module | None = None
 
@@ -175,6 +176,51 @@ def _sites(a, b, trail, out):
         elif va != vb or type(va) is not type(vb):
             out.append((here, b))
             return
+
+
+_NAME_INTROSPECTION = {"locals", "vars", "eval", "exec", "dir", "_getframe", "currentframe", "f_locals", "inspect"}
+
+
+def _code_shape(code, top=True):
+    """What a code object does, without line numbers and without the names of its plain locals."""
+    args = code.co_argcount + code.co_kwonlyargcount + bool(code.co_flags & 0x04) + bool(code.co_flags & 0x08)
+    consts = tuple(_code_shape(c, False) if hasattr(c, "co_code") else (type(c).__name__, repr(c)) for c in code.co_consts)
+    return (code.co_code, code.co_names, code.co_argcount, code.co_posonlyargcount, code.co_kwonlyargcount,
+            code.co_flags, code.co_cellvars, code.co_freevars, code.co_varnames[:args], len(code.co_varnames),
+            code.co_exceptiontable, code.co_stacksize, consts, None if top else code.co_name)
+
+
+def same_bytecode(old_def, new_def) -> bool:
+    """Do two versions of a function compile to the same instructions?
+
+    Compared: instructions, constants, global and attribute names, argument names, closure
+    variables and the exception table, recursively for nested code.  Ignored: line numbers and
+    the names of local variables that are not arguments or closure cells.  A function that
+    looks at its own local names (locals(), eval, frames) is never called equivalent."""
+    try:
+        codes = []
+        for node in (old_def, new_def):
+            module = compile(ast.Module(body=[node], type_ignores=[]), "<equiv>", "exec", dont_inherit=True)
+            inner = [c for c in module.co_consts if hasattr(c, "co_code") and c.co_name == node.name]
+            if len(inner) != 1:
+                return False
+            codes.append((inner[0], _code_shape(module)))
+    except (SyntaxError, ValueError, RecursionError):
+        return False
+    (a, shell_a), (b, shell_b) = codes
+    if shell_a != shell_b:  # decorators, defaults, annotations: the code that defines the function
+        return False
+
+    def names(code):
+        out = set(code.co_names)
+        for c in code.co_consts:
+            if hasattr(c, "co_code"):
+                out |= names(c)
+        return out
+
+    if names(a) & _NAME_INTROSPECTION and a.co_varnames != b.co_varnames:
+        return False
+    return _code_shape(a) == _code_shape(b)
 
 
 def _no_op(stmt) -> bool:
@@ -390,6 +436,14 @@ class _Walker:
         before = len(self.res.marks)
         self.body(o.body, n.body, _Ctx(ctx.scope, True, qual), parent=o)
         if outer and len(self.res.marks) != before:
+            header_same = not (name_changed or deco_changed or sig_changed or params_changed or ann_changed)
+            if header_same and same_bytecode(o, n):
+                # Renamed local variables, folded constants, annotations of locals: the compiler
+                # produces the same instructions, so no caller can see a difference.
+                del self.res.marks[before:]
+                self.res.no_op_changes = True
+                self.res.equivalent.append(qual)
+                return
             self.to_compile.append(n)
         elif outer and (name_changed or deco_changed or sig_changed or params_changed or ann_changed):
             self.to_compile.append(n)
