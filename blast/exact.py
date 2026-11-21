@@ -131,16 +131,80 @@ def finish(job: Job, timeout: float) -> None:
         shutil.rmtree(job.root, ignore_errors=True)
 
 
-def groups_from(job: Job, maps, Group) -> list:
+def untracked_users(name: str, how: str, maps, analyzer) -> tuple[int, str] | None:
+    """Users of a changed value that maps/reads.json cannot know, or None when the map can be trusted.
+
+    reads.json records loads of names bound by an assignment statement.  It has nothing to say about
+    a name bound by an import, a def or a class statement (a re-export such as `sqlglot.to_table`),
+    about a name created at run time, nor about a value the interpreter consumes without a load
+    (`__slots__`).  For those, an empty answer from the map does not mean "nobody uses it".
+
+    how: "removed" (the name is gone), "rebound" (it now names another function, class or module),
+    "added" (it is new) or "changed" (same object, other content: a function whose body changed
+    is found through line coverage, a table through its readers)."""
+    definer, _, attr = name.partition("|")
+    module, _, qual = definer.partition(":")
+    rel = maps.module_path(module)
+    if attr.startswith("__") and attr.endswith("__"):
+        mask = maps.class_users(definer) if qual else maps.module_tests(module)
+        st = maps.static(rel) if rel else None
+        for sc in (st["scopes"] if st and qual else []):
+            if sc[0] == qual:
+                mask |= maps.line_tests(rel, sc[2], sc[3])
+        return mask, f"exact: {name} changed (consumed by the interpreter): tests that used the {'class' if qual else 'module'}"
+    if attr.startswith("<"):
+        return None
+    if how == "added":
+        # a new name has no reader at the pinned commit, unless it now hides an inherited value
+        if not qual:
+            return None
+        info = maps.class_info(definer)
+        users = maps.class_users(definer)
+        mask = 0
+        for base in (info["mro"] if info else []):
+            _, whole = maps.readers(f"{base}|{attr}")
+            mask |= (whole & users) if users else whole
+        return (mask, f"exact: new {name} hides an inherited value: its readers that used the class") if mask else None
+    if how not in ("removed", "rebound") or maps.has_reads(name) or (rel and maps.assigned(rel, qual, attr)):
+        return None
+    if qual:
+        return maps.class_users(definer), f"exact: {name} {how} (not bound by an assignment): tests that used the class"
+    if analyzer is None:
+        return maps.module_tests(module), f"exact: {name} {how} (not bound by an assignment): tests that load the module"
+    mask, _modules = analyzer.name_users(module, attr, rel)
+    text = analyzer.src.read(rel) if rel else None
+    if text:
+        mask |= analyzer.local_mentions(rel, text, attr)[0]
+    return mask, f"exact: {name} {how} (bound by an import, a def or at run time): tests executing code that imports or reads it"
+
+
+def groups_from(job: Job, maps, Group, analyzer=None) -> list:
     """Candidate groups for what the comparison found."""
     out = []
     result = job.result or {}
     known = job.analysis.exact.names
+    removed, added, rebound = (set(result.get(k, ())) for k in ("removed", "added", "rebound"))
+    broken = set(result.get("errors", {}))
+    # a module the patch removes: its names are all gone, and its loaders are selected as such
+    broken |= {maps.module_of(rel) or "" for rel, text in job.analysis.exact.files.items() if text is None}
+    budget = [C.NAME_USER_SEARCHES]
     for name, keys in sorted(result.get("changed", {}).items()):
         if keys == "order" and name not in known:
             # Same members in another order, in a value the edit does not feed (maps/derive.json):
             # such tuples are built by iterating sets and differ from process to process.
             continue
+        if name.split(":", 1)[0] in broken:
+            continue  # a module that no longer imports: all its names are gone, its loaders are selected below
+        if not name.endswith("|<bases>"):
+            how = "removed" if name in removed else "added" if name in added else "rebound" if name in rebound else "changed"
+            searching = how in ("removed", "rebound") and "|" in name and not name.split(":", 1)[1].split("|")[0]
+            if searching:
+                budget[0] -= 1
+            extra = untracked_users(name, how, maps, analyzer if budget[0] >= 0 else None)
+            if extra is not None:
+                if extra[0]:
+                    out.append(Group(C.P_NAME_MENTION, extra[0], extra[1]))
+                continue
         if name.endswith("|<bases>"):
             mask = maps.class_users(name.split("|")[0])
             if mask:
@@ -159,6 +223,8 @@ def groups_from(job: Job, maps, Group) -> list:
                 out.append(Group(C.P_VALUE_EXACT, any_reader, f"exact: {name} changed: tests that read it"))
     for module, message in sorted(result.get("errors", {}).items()):
         mask = maps.module_tests(module)
+        if result.get("fatal"):
+            mask = maps.all_mask  # the package itself fails to import: so does every test file
         rel = maps.module_path(module)
         if rel:
             mask |= maps.file_line_tests(rel)

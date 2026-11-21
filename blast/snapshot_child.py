@@ -81,7 +81,12 @@ def compare(base: dict, snap: dict) -> dict:
         else:
             changed[name] = "order"
     errors = {m: e for m, e in snap["errors"].items() if m not in base["errors"]}
-    return {"changed": changed, "errors": errors}
+    # names that vanished, appeared, or are now bound to another function / class / module
+    removed = sorted(n for n in changed if n not in snap["values"])
+    added = sorted(n for n in changed if n not in base["values"])
+    rebound = sorted(n for n in changed if n in snap["values"] and n in base["values"]
+                     and base["values"][n].get("i") != snap["values"][n].get("i"))
+    return {"changed": changed, "errors": errors, "removed": removed, "added": added, "rebound": rebound}
 
 
 def main(argv: list[str]) -> int:
@@ -114,6 +119,10 @@ def main(argv: list[str]) -> int:
               f"({', '.join(sorted(variants)[:6])}), {len(first['errors'])} modules that do not import", file=sys.stderr)
         return 0
     snap = _take(root)
+    if snap.get("fatal"):
+        # `import sqlglot` itself failed: no value can be compared, every module is broken
+        json.dump({"changed": {}, "errors": snap["errors"], "fatal": True}, sys.stdout, separators=(",", ":"))
+        return 0
     with open(base_path, "rb") as fh:
         base = json.load(fh)
     json.dump(compare(base, snap), sys.stdout, separators=(",", ":"))

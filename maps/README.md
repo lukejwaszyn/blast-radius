@@ -203,6 +203,31 @@ coarse fallback for "anything in this file changed" and the exact answer for
   `pyproject.toml` and `setup.cfg` are read by pytest itself when it starts, for
   every test file: a change of pytest configuration there reaches every test.
 
+### warm.json — lines a test reaches only through what earlier tests left behind
+`cov.json` describes every test alone. A real run keeps one process for many
+tests, and a test can leave state behind that sends a later test down a path it
+never takes alone. At the pinned commit `tests/test_dialect_entry_points.py`
+clears the dialect registry (`Dialect._classes.clear()`) in `setUp` and
+`tearDown`; every later test in the same process that looks up a dialect whose
+module is already imported then runs the "class not registered" branch of
+`Dialect._try_load`, which no test executes alone.
+
+`tools/warm_trace.py` runs the whole suite in **one** process under the same line
+tracer, in several orders (collection order, reversed, two shuffles), and keeps
+every (line, test) pair that `cov.json` and `filecov.json` do not have.
+`lines[path][line]` → index into `sets`: the tests seen on that line in any of
+the runs **united with every test that executes the enclosing function alone**
+(which tests come after the state-leaving test depends on the order of the run,
+so any caller of the function is a candidate). `observed[path][line]` keeps the
+tests actually seen, `orders` the runs and how many pairs each found. The file
+is tiny (a few dozen lines of sqlglot). Outside the collection order a handful
+of tests fail at the pinned commit itself for the same reason; their traces are
+used all the same.
+
+`blast/maps.py::call_tests` unites `cov.json` with this map, so "a line no test
+executed selects nothing" stays true only for lines that no test executes in a
+shared process either.
+
 ## From a patch to candidate tests
 
 The order in which `tools/verify_samples.py` consults the maps (it is a checker,

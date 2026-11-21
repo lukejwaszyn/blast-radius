@@ -25,13 +25,14 @@ beyond the kit's `requirements.lock` is used.
 | `trace_imports.py reads` | imports the rewritten copy: what each definition-time statement reads; the run-time class table |
 | `run_trace.py --reads` | reads pass: the suite on the rewritten copy, each test in its own fork |
 | `aggregate.py` | unites the raw runs into `maps/*.json` |
+| `warm_trace.py` | runs the whole suite in one process (several orders) under the line tracer and writes the lines a test executes only because of state earlier tests left behind → `warm.json` (run after `aggregate.py`: it compares with `cov.json`) |
 | `snapshot.py` | fingerprints every class-level / module-level value of a sqlglot tree and compares two fingerprints: names the values (and dict keys) a definition-time edit really changes, derived ones included, in the vocabulary of `reads.json` |
 | `verify_samples.py` | replays patches with known answers against the maps and prints, per patch, candidate-set sizes per map and which map catches each failing test (results: `maps/VERIFY.md`) |
 | `dev_check_mutations.py` | development check: generates single-line edits of definition-time lines, has a labeler run the full suite on them and checks the failing tests are inside the maps' answer |
 | `fetch_sqlglot.py`, `check_image.py` | image build steps: download sqlglot at the pinned commit; check that the checkout matches the maps and that the selector answers three made-up patches sensibly |
 | `dev_eval.py` | development check of the selector: run it on patches with known failing tests (the kit's sample, or patches labeled by running the suite) and print selected vs failing, cost vs perfect-knowledge cost, misses |
 | `mapfmt.py` | the range-string encoding of test sets |
-| `tracer/` | `sitecustomize.py` (switches tracing on in every process, subprocesses of tests included), `blast_trace.py` (lines, opens), `blast_pytest.py` (fork per test), `blast_reads.py` (reads) |
+| `tracer/` | `sitecustomize.py` (switches tracing on in every process, subprocesses of tests included), `blast_trace.py` (lines, opens), `blast_pytest.py` (fork per test), `blast_reads.py` (reads), `blast_warm.py` (no fork: per-test lines in a shared process, in a chosen order) |
 
 ## Design decisions that matter for correctness
 

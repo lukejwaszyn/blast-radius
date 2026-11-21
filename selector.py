@@ -133,7 +133,7 @@ class Run:
             exact.finish(job, C.SNAPSHOT_TIMEOUT_S - (time.monotonic() - job.started))
             an = job.analysis
             if job.result is not None:
-                found = exact.groups_from(job, self.maps, Group)
+                found = exact.groups_from(job, self.maps, Group, self.analyzer)
                 an.groups.extend(found)
                 an.notes.append(f"imported the patched tree: {len(job.result.get('changed', {}))} changed values, "
                                 f"{len(job.result.get('errors', {}))} modules that no longer import")
@@ -144,6 +144,10 @@ class Run:
     def import_failed(self, an: Analysis, why: str):
         """The patched tree could not be imported to the end (hang, crash): assume the touched modules are broken."""
         an.notes.append(why)
+        touched = {self.maps.module_of(rel) or "" for rel in an.exact.files}
+        if not an.exact.modules or not touched <= an.exact.modules:
+            # a new or removed module: nothing narrower is known about what the import ran into
+            an.add(C.P_MODULE_BROKEN, self.maps.package_tests("sqlglot"), f"{why}: every test that loads sqlglot")
         for module in sorted(an.exact.modules):
             mask = self.maps.module_tests(module)
             rel = self.maps.module_path(module)

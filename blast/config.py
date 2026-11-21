@@ -119,6 +119,9 @@ SNAPSHOT_TIMEOUT_S = 8.0
 SNAPSHOT_PARALLEL = 2
 
 # ------------------------------------------------------------------ limits
+# Searches of the pinned source for the users of a removed / rebound name, per commit; beyond
+# that the coarser "tests that load the module" is used.
+NAME_USER_SEARCHES = 24
 # Wall-clock budget for the whole batch (the scorer allows 180 s; the final 270 s).
 WALL_BUDGET_S = float(os.environ.get("BLAST_WALL_BUDGET", "120"))
 # Search for a hunk whose stated position does not match, this many lines around.

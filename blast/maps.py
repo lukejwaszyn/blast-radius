@@ -67,6 +67,8 @@ class Maps:
         self._subclasses = None
         self._module_index = None
         self._stmt_index: dict[str, dict] = {}
+        self._warm = None
+        self._assigned_index: dict[str, set] = {}
 
     # ------------------------------------------------------------- loading
     def load(self, name: str):
@@ -123,11 +125,31 @@ class Maps:
                 yield runs[k][2]
             k += 1
 
-    def call_tests(self, rel: str, lo: int, hi: int) -> int:
-        """Tests that executed a line of rel[lo..hi] at call time (cov.json)."""
+    def call_tests(self, rel: str, lo: int, hi: int, warm: bool = True) -> int:
+        """Tests that executed a line of rel[lo..hi] at call time (cov.json), and the tests that can
+        execute it in a process where other tests ran before them (warm.json)."""
         mask = 0
         for sid in set(self._overlapping("cov", rel, lo, hi)):
             mask |= self._set("cov", sid)
+        if warm:
+            mask |= self.warm_tests(rel, lo, hi)
+        return mask
+
+    def warm_tests(self, rel: str, lo: int, hi: int) -> int:
+        """Tests that can reach a line of rel[lo..hi] only through state an earlier test left behind
+        (maps/warm.json: lines seen in shared-process runs that no test executes alone)."""
+        if self._warm is None:
+            try:
+                self._warm = self.load("warm")
+            except (OSError, ValueError):
+                self._warm = {"lines": {}, "sets": []}
+        lines = self._warm["lines"].get(rel)
+        if not lines:
+            return 0
+        mask = 0
+        for key, sid in lines.items():
+            if lo <= int(key) <= hi:
+                mask |= mask_of(self._warm["sets"][sid])
         return mask
 
     def import_tests(self, rel: str, lo: int, hi: int) -> int:
@@ -268,6 +290,25 @@ class Maps:
             elif st[0] <= first <= st[1] and (best is None or st[1] - st[0] <= best[1] - best[0]):
                 best = st
         return best
+
+    def assigned(self, rel: str, scope: str, name: str) -> bool:
+        """Is `name` bound by an assignment statement directly in `scope` ("" = module level) of the
+        pinned file?  Those are the names maps/reads.json tracks loads of."""
+        info = self.static(rel)
+        if not info:
+            return False
+        index = self._assigned_index.get(rel)
+        if index is None:
+            index = set()
+            for st in info["stmts"]:
+                if st[3].startswith(("assign", "annassign", "augassign")):
+                    for target in st[4]:
+                        index.add((st[2], target))
+            self._assigned_index[rel] = index
+        if (scope, name) in index:
+            return True
+        cls = self.class_info(f"{info.get('module', '')}:{scope}") if scope else None
+        return bool(cls and name in cls.get("set_at_class_creation", ()))
 
     def in_function_body(self, rel: str, line: int) -> bool:
         info = self.static(rel)

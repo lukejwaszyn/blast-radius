@@ -42,4 +42,6 @@ mkdir -p "$WORK/rawB"
 "$PY" "$T/aggregate.py" --tests "$TESTS" --static "$WORK/static" --src "$SRC" \
     --lines "$WORK/rawA" "$WORK/rawA_s1" --imports "$WORK/rawI" \
     --reads "$WORK/rawB" "$WORK/rawB_s1" --out "$OUT"
+# 6. lines that only left-over state of earlier tests leads to (whole suite in one process, 4 orders)
+"$PY" "$T/warm_trace.py" --src "$SRC" --python "$PY" --work "$WORK" --maps "$OUT"
 echo "maps written to $OUT"

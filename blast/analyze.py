@@ -26,7 +26,7 @@ import sys
 from . import config as C
 from .diffparse import ApplyError, FileChange, apply_hunks, parse_patch
 from .maps import Maps
-from .pydiff import Mark, bound_names, diff_python
+from .pydiff import Mark, bound_names, diff_python, parse_source
 
 _PYTEST_INI_FILES = ("pytest.ini", ".pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml")
 _PYTEST_WORDS = re.compile(
@@ -183,6 +183,22 @@ class Analyzer:
             if os.path.basename(path) in _PYTEST_INI_FILES and "/" not in path:
                 mask = maps.all_mask
             an.add(p, mask, f"{path}: {why}: tests that open the file")
+
+    def test_dependents(self, path: str) -> int:
+        """Tests that depend on a Python file of the test tree beyond what line coverage says: the
+        tests it defines and, for a package marker or a conftest.py, every test below its directory
+        (importing `tests.x` runs tests/__init__.py first; pytest loads a conftest.py for its directory)
+        and every test whose file imports a module of that package."""
+        maps = self.maps
+        mask = maps.tests_in_file(path)
+        if os.path.basename(path) in ("__init__.py", "conftest.py"):
+            directory = os.path.dirname(path)
+            mask |= self.tests_under(directory)
+            prefix = directory + "/" if directory else ""
+            for rel in self.src.python_files():
+                if rel.startswith(prefix) and rel != path:
+                    mask |= maps.file_line_tests(rel)
+        return mask
 
     def tests_under(self, directory: str) -> int:
         prefix = directory.rstrip("/") + "/" if directory else ""
@@ -418,6 +434,18 @@ class Analyzer:
         maps = self.maps
         diff = diff_python(old_text, applied, self.src.ast_cache, path, filename=path)
         readers = maps.text_reader_tests(path)
+        new_text = applied.new_text()
+        if not diff.broken and not new_text.isascii() and declared_encoding(old_text) != declared_encoding(new_text):
+            # Every non-ASCII literal of the file now decodes differently, also in statements the
+            # hunks do not touch (those are otherwise taken as unchanged without being compared).
+            an.notes.append(f"{path}: source encoding declaration changed and the file holds non-ASCII text")
+            if cat == "src":
+                module = maps.module_of(path) or ""
+                an.add(C.P_MODULE_UNCONFINED, maps.module_tests(module) | maps.file_line_tests(path) | readers,
+                       f"{path}: source encoding changed: every test that loads the module")
+            else:
+                an.add(C.P_TEST_FILE_LEVEL, self.test_dependents(path) | maps.file_line_tests(path) | readers,
+                       f"{path}: source encoding changed: its tests and the tests that import it")
         if diff.broken:
             an.notes.append(f"{path}: does not compile after the patch ({diff.broken})")
             if cat == "src":
@@ -427,7 +455,7 @@ class Analyzer:
                     mask |= maps.package_tests(module)
                 an.add(C.P_MODULE_BROKEN, mask, f"{path}: no longer compiles: every test that loads the module")
             elif cat == "test" or maps.covered(path):
-                mask = maps.tests_in_file(path) | maps.file_line_tests(path) | readers
+                mask = self.test_dependents(path) | maps.file_line_tests(path) | readers
                 an.add(C.P_TEST_FILE_BROKEN, mask, f"{path}: no longer compiles: its tests and the tests that import it")
             return
         if diff.same_ast:
@@ -477,6 +505,177 @@ class Analyzer:
                         def_time_modules.add(maps.module_of(rel) or "")
         return mask, def_time_modules
 
+    # --------------------------------------------- who uses a module-level name
+    def module_file(self, module: str) -> str | None:
+        rel = module.replace(".", "/")
+        for cand in (rel + ".py", rel + "/__init__.py"):
+            if self.src.exists(cand):
+                return cand
+        return None
+
+    def _tree(self, rel: str):
+        text = self.src.read(rel)
+        if text is None:
+            return None
+        try:
+            return parse_source(text, self.src.ast_cache, rel)
+        except (SyntaxError, ValueError, RecursionError):
+            return None
+
+    @staticmethod
+    def _import_source(node: ast.ImportFrom, this_module: str, is_package: bool) -> str:
+        """The absolute module an ImportFrom statement imports from."""
+        module = node.module or ""
+        if not node.level:
+            return module
+        base = this_module.split(".") if this_module else []
+        if not is_package:
+            base = base[:-1]
+        if node.level > 1:
+            base = base[:len(base) - (node.level - 1)]
+        return ".".join(base + ([module] if module else []))
+
+    def module_aliases(self, rel: str, depth: int = 0) -> dict[str, str]:
+        """{local name: dotted module} for the names a file binds to modules of the pinned tree by
+        import statements (anywhere in the file), following `from pkg import alias` a few levels."""
+        cache = self.__dict__.setdefault("_alias_cache", {})
+        if rel in cache:
+            return cache[rel]
+        cache[rel] = out = {}
+        tree = self._tree(rel)
+        if tree is None:
+            return out
+        for source, names, _lo, _hi in self._name_index(rel)[1]:
+            for imported, bound in names.items():
+                if imported == "*":
+                    continue
+                if self.module_file(f"{source}.{imported}"):
+                    out[bound] = f"{source}.{imported}"
+                elif depth < 3:
+                    src_rel = self.module_file(source)
+                    target = self.module_aliases(src_rel, depth + 1).get(imported) if src_rel else None
+                    if target:
+                        out[bound] = target
+        for node in ast.walk(tree) if "import " in (self.src.read(rel) or "") else ():
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    if a.asname:
+                        out[a.asname] = a.name
+                    else:
+                        out[a.name.split(".")[0]] = a.name.split(".")[0]
+        return out
+
+    def _dotted_module(self, expr, aliases: dict[str, str]) -> str | None:
+        if isinstance(expr, ast.Name):
+            return aliases.get(expr.id)
+        if isinstance(expr, ast.Attribute):
+            base = self._dotted_module(expr.value, aliases)
+            if base is None:
+                return None
+            if self.module_file(f"{base}.{expr.attr}"):
+                return f"{base}.{expr.attr}"
+            base_rel = self.module_file(base)
+            return self.module_aliases(base_rel).get(expr.attr) if base_rel else None
+        return None
+
+    def _name_index(self, rel: str):
+        """Per file, once: its `from x import ...` statements and its attribute reads by attribute name."""
+        cache = self.__dict__.setdefault("_name_index_cache", {})
+        got = cache.get(rel)
+        if got is not None:
+            return got
+        imports: list = []     # (source module, {imported name: bound name}, first line, last line)
+        attrs: dict = {}       # attribute name -> [(expression before the dot, first line, last line)]
+        tree = self._tree(rel)
+        if tree is not None:
+            this_module = self.maps.module_of(rel) or ""
+            package = rel.endswith("__init__.py")
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    imports.append((self._import_source(node, this_module, package),
+                                    {a.name: a.asname or a.name for a in node.names}, node.lineno, node.end_lineno))
+                elif isinstance(node, ast.Attribute):
+                    attrs.setdefault(node.attr, []).append((node.value, node.lineno, node.end_lineno))
+        cache[rel] = got = (tree is not None, imports, attrs)
+        return got
+
+    def star_importers(self, module: str) -> list[str]:
+        out = []
+        for rel in self.src.python_files():
+            text = self.src.read(rel)
+            if not text or "import *" not in text:
+                continue
+            for source, names, _lo, _hi in self._name_index(rel)[1]:
+                if "*" in names and source == module:
+                    out.append(rel)
+                    break
+        return out
+
+    def name_users(self, module: str, name: str, own_rel: str | None = None, _seen: set | None = None) -> tuple[int, set[str]]:
+        """Tests that can notice that the module-level `name` of `module` is gone or bound to
+        something else, by every spelling the pinned tree uses:
+
+          from module import name      the tests that execute the statement (in a test file: the
+                                       tests of every file whose import runs it);
+          alias.name / pkg.mod.name    the tests that execute the line, when the object before the
+                                       dot is that module;
+          "pkg.mod.name" in a string   (mock.patch targets) the tests that execute the line.
+
+        A sqlglot module that imports the name at module level passes the change on (and breaks at
+        import if the name is gone): its own users are added, and it is returned in the second
+        value.  The module's own file is the caller's business (`own_rel` is skipped)."""
+        maps = self.maps
+        seen = _seen if _seen is not None else set()
+        if (module, name) in seen:
+            return 0, set()
+        seen.add((module, name))
+        pattern = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])")
+        dotted = f"{module}.{name}"
+        mask = 0
+        def_modules: set[str] = set()
+        for rel in self.src.python_files():
+            if rel == own_rel:
+                continue
+            text = self.src.read(rel)
+            if not text:
+                continue
+            star = "import *" in text
+            if name not in text and not star:
+                continue
+            lines = text.split("\n")
+            hits = [i for i, line in enumerate(lines, 1) if name in line and pattern.search(line)]
+            if not hits and not star:
+                continue
+            for number in hits:
+                if dotted in lines[number - 1]:
+                    mask |= maps.line_tests(rel, number, number)
+            parsed, imports, attrs = self._name_index(rel)
+            if not parsed:
+                for number in hits:
+                    mask |= maps.line_tests(rel, number, number)
+                continue
+            this_module = maps.module_of(rel) or ""
+            for source, names, lo, hi in imports:
+                if source != module or not (name in names or "*" in names):
+                    continue
+                mask |= maps.line_tests(rel, lo, hi)
+                if maps.in_function_body(rel, lo):
+                    continue
+                if rel.startswith("sqlglot/"):
+                    def_modules.add(this_module)
+                    bound = names.get(name, name)
+                    more, more_modules = self.name_users(this_module, bound, rel, seen)
+                    mask |= more | self.local_mentions(rel, text, bound, (lo, hi))[0]
+                    def_modules |= more_modules
+                else:
+                    mask |= maps.tests_in_file(rel)
+            if hits and name in attrs:
+                aliases = self.module_aliases(rel)
+                for value, lo, hi in attrs[name]:
+                    if self._dotted_module(value, aliases) == module:
+                        mask |= maps.line_tests(rel, lo, hi)
+        return mask, def_modules
+
     def local_mentions(self, path: str, old_text: str, name: str, skip_range=None, skip_ranges=()) -> tuple[int, bool]:
         """Tests executing lines of this file that mention `name`; and whether a definition-time line does."""
         maps = self.maps
@@ -493,6 +692,32 @@ class Analyzer:
                 if not maps.in_function_body(path, number):
                     def_time = True
         return mask, def_time
+
+
+_CODING = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
+
+
+def declared_encoding(text: str) -> str:
+    """The source encoding Python uses for a file (PEP 263): a coding cookie on the first line, or on
+    the second when the first is blank or a comment; a UTF-8 byte order mark; UTF-8 otherwise."""
+    import codecs
+
+    lines = text.split("\n", 2)[:2]
+    found = None
+    for i, line in enumerate(lines):
+        line = line.lstrip("\ufeff") if i == 0 else line
+        m = _CODING.match(line)
+        if m:
+            found = m.group(1)
+            break
+        if line.strip() and not line.lstrip().startswith("#"):
+            break
+    if found is None:
+        return "utf-8"
+    try:
+        return codecs.lookup(found).name
+    except LookupError:
+        return "?" + found
 
 
 def _filter_comments(s: str) -> str:
@@ -611,6 +836,10 @@ class _TestFile(_FileCtx):
     def lines(self, lo: int, hi: int) -> int:
         return self.maps.line_tests(self.path, lo, hi)
 
+    def own_tests(self) -> int:
+        """The tests of this file; for tests/**/__init__.py (and a conftest.py) every test below it."""
+        return self.az.test_dependents(self.path)
+
     def anchors(self, mark: Mark) -> int:
         mask = 0
         for lo, hi in mark.info.get("anchors", ()):
@@ -619,7 +848,7 @@ class _TestFile(_FileCtx):
             mask |= self.maps.import_tests(self.path, lo, lo) | self.maps.import_tests(self.path, hi, hi)
             mask |= self.maps.call_tests(self.path, lo, lo)
         if not mask:
-            mask = self.maps.tests_in_file(self.path)
+            mask = self.own_tests()
         return mask
 
     def mark(self, m: Mark):
@@ -648,16 +877,16 @@ class _TestFile(_FileCtx):
                     an.add(C.P_TEST_FILE_LEVEL, precise,
                            f"{path}:{m.lo}-{m.hi}: {'/'.join(targets)} changed: tests executing lines that mention it")
                 else:
-                    an.add(C.P_TEST_FILE_LEVEL, self.lines(m.lo, m.hi) or self.maps.tests_in_file(path),
+                    an.add(C.P_TEST_FILE_LEVEL, self.lines(m.lo, m.hi) or self.own_tests(),
                            f"{path}:{m.lo}-{m.hi}: module/class-level statement changed: tests of the files whose import runs it")
         elif kind == "import":
             self.import_marks.append(m)
         elif kind == "moved":
             if m.info["is_def"] or m.info.get("is_import"):
-                an.add(C.P_NEW_TEST, self.lines(m.lo, m.hi) or self.maps.tests_in_file(path),
+                an.add(C.P_NEW_TEST, self.lines(m.lo, m.hi) or self.own_tests(),
                        f"{path}: a def, class or import moved inside its file")
             else:
-                an.add(C.P_TEST_FILE_LEVEL, self.maps.import_tests(path, m.lo, m.hi) or self.maps.tests_in_file(path),
+                an.add(C.P_TEST_FILE_LEVEL, self.maps.import_tests(path, m.lo, m.hi) or self.own_tests(),
                        f"{path}: a module/class-level statement moved; later statements may depend on it")
         elif kind == "defhdr":
             lo, hi = m.info["body"]
@@ -665,7 +894,7 @@ class _TestFile(_FileCtx):
                 an.add(C.P_TEST_BODY, self.lines(m.lo, hi), f"{path}: def {m.info['name']} header changed: tests that run it")
             if m.info["name_changed"]:
                 self.name_gone(m.info["name"], (m.lo, hi))
-                self.new_def(m.scope, m.info["new_name"], self.lines(m.lo, hi) or self.maps.tests_in_file(path))
+                self.new_def(m.scope, m.info["new_name"], self.lines(m.lo, hi) or self.own_tests())
         elif kind == "defdel":
             lo, hi = m.info["body"]
             an.add(C.P_TEST_BODY, self.lines(m.lo, hi), f"{path}: def {m.info['name']} removed: tests that ran it")
@@ -683,9 +912,9 @@ class _TestFile(_FileCtx):
             an.add(C.P_NEW_TEST, self.anchors(m), f"{path}: new class with a fresh name")
         elif kind == "block":
             mask = self.lines(m.lo, m.hi) if m.lo else self.anchors(m)
-            an.add(C.P_TEST_FILE_LEVEL, mask or self.maps.tests_in_file(path), f"{path}: module/class-level block changed")
+            an.add(C.P_TEST_FILE_LEVEL, mask or self.own_tests(), f"{path}: module/class-level block changed")
         else:
-            an.add(C.P_TEST_FILE_LEVEL, self.maps.tests_in_file(path) | self.maps.file_line_tests(path), f"{path}: {m.info.get('why', kind)}")
+            an.add(C.P_TEST_FILE_LEVEL, self.own_tests() | self.maps.file_line_tests(path), f"{path}: {m.info.get('why', kind)}")
 
     def finish(self):
         an, path = self.an, self.path
@@ -698,7 +927,7 @@ class _TestFile(_FileCtx):
                 mask |= self.lines(lo, hi)
             for lo, hi in net["anchors"]:
                 mask |= self.maps.import_tests(path, lo, lo) | self.maps.import_tests(path, hi, hi)
-            an.add(C.P_TEST_FILE_LEVEL, mask or self.maps.tests_in_file(path),
+            an.add(C.P_TEST_FILE_LEVEL, mask or self.own_tests(),
                    f"{path}: imports changed ({', '.join(net['removed'] + net['added'] + net['rebound'])}): "
                    "tests of the files whose import runs them")
             for name in net["removed"] + net["rebound"]:
@@ -858,6 +1087,7 @@ class _SrcFile(_FileCtx):
                 self.unconfined(f"line {m.lo or '(new)'}: module/class-level statement with side effects only",
                                 fallback_only=targets == ["__doc__"])
             return
+        self.implicit_consumers(m, targets)
         names = [f"{definer}|{t}" for t in targets]
         keys = None
         if info.get("keys") is not None and len(names) == 1:
@@ -877,6 +1107,57 @@ class _SrcFile(_FileCtx):
         if op == "delete" and not m.scope:
             for t in targets:
                 self.name_gone("", t, (m.lo, m.hi))
+
+    def class_range_tests(self, scope: str) -> int:
+        """Tests that used the class `scope` of this file (or a subclass), or ran a line of its body."""
+        maps = self.maps
+        mask = maps.class_users(self.definer(scope))
+        st = maps.static(self.path)
+        for sc in (st["scopes"] if st else []):
+            if sc[0] == scope:
+                mask |= maps.line_tests(self.path, sc[2], sc[3])
+        return mask
+
+    def implicit_consumers(self, m: Mark, targets: list[str]):
+        """Values that are used without ever being loaded by name, so maps/reads.json cannot know
+        their readers: `__slots__`, `__match_args__`, `__hash__ = None` ... are consumed by the
+        interpreter when the class is created or an instance is used; `__all__` by `import *`; the
+        body of a decorated class (a dataclass) or of a NamedTuple / TypedDict by whatever builds
+        the real class from it.  Those reach every test that uses the class (or loads the module)."""
+        an, maps, path = self.an, self.maps, self.path
+        dunder = [t for t in targets if t.startswith("__") and t.endswith("__") and t != "__doc__"]
+        if m.scope:
+            transformed = self.class_is_transformed(m.scope)
+            if dunder or transformed:
+                what = "/".join(dunder) if dunder else "a field"
+                why = "consumed when the class is created" if dunder else "the class is built from its body by a decorator or a special base"
+                an.add(C.P_CLASS_USER, self.class_range_tests(m.scope),
+                       f"{path}: {what} of {m.scope} changed ({why}): tests that used the class")
+            return
+        for t in dunder:
+            if t == "__all__":
+                mask = 0
+                for rel in self.az.star_importers(self.module):
+                    mask |= maps.module_tests(maps.module_of(rel) or "") | maps.file_line_tests(rel) | maps.tests_in_file(rel)
+                an.add(C.P_VALUE_READ, mask, f"{path}: __all__ changed: tests that load a file doing `from {self.module} import *`")
+            else:
+                self.unconfined(f"module-level {t} changed (read by the interpreter, not by code)")
+
+    def class_is_transformed(self, scope: str) -> bool:
+        body = self.diff.old_tree.body
+        node = None
+        for part in scope.split("."):
+            node = next((s for s in body if isinstance(s, ast.ClassDef) and s.name == part), None)
+            if node is None:
+                return False
+            body = node.body
+        if node.decorator_list:
+            return True
+        for base in node.bases:
+            text = ast.unparse(base)
+            if text.rsplit(".", 1)[-1] in ("NamedTuple", "TypedDict", "Protocol"):
+                return True
+        return False
 
     def value_names(self, names: list[str], keys: list[str] | None, why: str):
         an, maps = self.an, self.maps
@@ -944,6 +1225,14 @@ class _SrcFile(_FileCtx):
             an.notes.append(f"{path}: imports reordered or regrouped, same bindings")
             return
         scope = net["scope"]
+        future = {k for side in ("old", "new") for k, v in net[side].items() if v[0] == "__future__"}
+        if future & (set(net["removed"]) | set(net["added"])):
+            # `from __future__ import annotations` (or another feature) switched on or off: the whole
+            # file compiles differently.  With annotations no longer deferred, a def nested in a
+            # function evaluates its annotations when it runs, and may meet names that only exist
+            # for type checkers; module-level and class-level defs are covered by importing the tree.
+            an.add(C.P_IMPORT_REBIND, maps.file_line_tests(path), f"{path}: __future__ import changed: tests that execute code of the file")
+            net = dict(net, removed=[n for n in net["removed"] if n not in future], added=[n for n in net["added"] if n not in future])
         gone = list(net["removed"]) + list(net["rebound"])
         # a new import can take over a name the module already uses (a builtin, another binding)
         taken = set(self.old_scope_names(scope))
@@ -953,8 +1242,8 @@ class _SrcFile(_FileCtx):
             mask, at_def = self.az.local_mentions(path, self.old_text, name, skip_ranges=net["ranges"])
             an.add(C.P_IMPORT_REBIND, mask, f"{path}: import of `{name}` changed: tests executing lines that mention it")
             def_time_user = def_time_user or at_def
-            if not scope and name in net["removed"]:
-                # other modules may import the name from here
+            if not scope and (name in net["removed"] or name in net["rebound"]):
+                # other files may import the name from here, or read it as an attribute of the module
                 self.reexport_gone(name)
         broken = self.import_resolves(net["new"]) if net["new"] else None
         if broken:
@@ -1015,9 +1304,17 @@ class _SrcFile(_FileCtx):
         return False
 
     def reexport_gone(self, name: str):
-        mask, def_modules = self.az.mention_tests(name, skip=self.path)
-        # restricted to files that import from this module
-        self.an.fallback(C.P_NAME_MENTION, mask, f"`{name}` is no longer importable from {self.module}")
+        """A module-level name bound by an import is gone or bound to something else.  maps/reads.json
+        does not track imported names, so their users are found in the pinned source."""
+        maps = self.maps
+        mask, def_modules = self.az.name_users(self.module, name, self.path)
+        self.an.add(C.P_NAME_MENTION, mask, f"`{name}` of {self.module} changed: tests executing code that imports or reads it")
+        broken = 0
+        for module in def_modules:
+            broken |= maps.module_tests(module)
+        # a sqlglot module that imports the name while being imported breaks: the import of the
+        # patched tree reports it; this is the stand-in when that cannot run
+        self.an.fallback(C.P_MODULE_BROKEN, broken, f"modules that import `{name}` from {self.module} at import")
 
     # --------------------------------------------------------- names, defs
     def name_gone(self, scope: str, name: str, own_range):

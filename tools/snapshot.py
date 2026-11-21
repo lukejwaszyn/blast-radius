@@ -32,6 +32,7 @@ import functools
 import hashlib
 import importlib
 import json
+import logging
 import os
 import pkgutil
 import re
@@ -135,6 +136,9 @@ class Canon:
             return "partial(" + ",".join([self.text(v.func, d), self.text(v.args, d), self.text(v.keywords, d)]) + ")"
         if isinstance(v, re.Pattern):
             return f"re:{v.pattern!r}:{v.flags}"
+        if isinstance(v, logging.Logger):
+            # a logger is its name; its level cache and handlers are run-time state
+            return f"logger:{v.name}"
         if isinstance(v, types.CodeType):
             return self.code(v, d)
         # any other object: its type plus its state
@@ -174,8 +178,24 @@ def _is_def(cls, name, value) -> bool:
     return False
 
 
+def identity(value) -> str | None:
+    """Which object a name is bound to, for the kinds of object that are defined once and
+    referred to from many namespaces (a function, a class, a module).  A function whose body
+    changed keeps its identity; a name bound to another function does not."""
+    if isinstance(value, (classmethod, staticmethod)):
+        value = value.__func__
+    if isinstance(value, (types.FunctionType, type)):
+        return f"{value.__module__}.{value.__qualname__}"
+    if isinstance(value, types.ModuleType):
+        return f"module {value.__name__}"
+    return None
+
+
 def fingerprint(value, canon: Canon) -> dict:
     out = {"v": _digest(canon.text(value))}
+    ident = identity(value)
+    if ident is not None:
+        out["i"] = ident
     keys = None
     if isinstance(value, dict):
         keys = {}
@@ -200,8 +220,11 @@ def fingerprint(value, canon: Canon) -> dict:
 
 def take(prefix: str = "sqlglot") -> dict:
     """Import every module of the package found on sys.path and fingerprint it."""
-    pkg = importlib.import_module(prefix)
     errors = {}
+    try:
+        pkg = importlib.import_module(prefix)
+    except BaseException as exc:  # the package itself no longer imports: nothing below it can
+        return {"values": {}, "errors": {prefix: f"{type(exc).__name__}: {exc}"[:300]}, "fatal": True}
     for info in sorted(pkgutil.walk_packages(pkg.__path__, prefix=prefix + "."), key=lambda i: i.name):
         if info.name.endswith("__main__"):
             continue
@@ -232,11 +255,20 @@ def take(prefix: str = "sqlglot") -> dict:
         if mod is None or not (mname == prefix or mname.startswith(prefix + ".")):
             continue
         for attr, value in list(vars(mod).items()):
+            if attr.startswith("__") and attr.endswith("__"):
+                continue
             if isinstance(value, type):
                 if value.__module__ == mname:
                     visit(value)
+                    if value.__qualname__ == attr:
+                        continue  # a class statement of this module
+                # a class or module a namespace merely refers to (an import, an alias): only *which*
+                # one it is can change here; what the class holds is fingerprinted where it is defined
+                values[f"{mname}:|{attr}"] = {"v": _digest(identity(value)), "i": identity(value)}
                 continue
-            if isinstance(value, types.ModuleType) or (attr.startswith("__") and attr.endswith("__")):
+            if isinstance(value, types.ModuleType):
+                if value.__name__ != f"{mname}.{attr}":  # (a package's own submodule is the import system's entry)
+                    values[f"{mname}:|{attr}"] = {"v": _digest(identity(value)), "i": identity(value)}
                 continue
             if isinstance(value, types.FunctionType) and value.__module__ == mname and value.__qualname__ == attr:
                 continue  # a def of this module: its body is line-covered
