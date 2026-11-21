@@ -157,9 +157,10 @@ always prints one line per commit.
 `make sample`: **165.2 simulated seconds, 0 misses** on the 30 sample commits
 (94.4 s is the cost with perfect knowledge). CPU for the batch, measured
 natively on a loaded arm64 laptop: 0.4 s for everything static plus 0.5 to
-0.9 s for each import comparison (4 of the 30 commits), 3.9 s in total; with
-`BLAST_SNAPSHOT=needed` (import only when the static answer is not confined
-to constants or is expensive) 2.2 s and the same selection on this set.
+0.9 s for each import comparison (4 of the 30 commits), 4 to 5 s in total;
+with `BLAST_SNAPSHOT=needed` (import only when the static answer is not
+confined to constants or is expensive) about half of that and the same
+selection on this set.
 
 | commits | selected / failing | note |
 | --- | --- | --- |
@@ -195,6 +196,51 @@ function-entry events in the tracer were found (fixed in the maps, see
 changes, garbage) the selector does not raise and gives the same answer in
 the image as natively.
 
+### Kinds of change the sample does not have
+
+A generator made 351 patches of twelve kinds against the pinned commit, with
+`git diff` so that the headers are git's own, and 180 of them, spread over the
+kinds, were labeled by running all 1620 tests on the patched tree. They are a
+check of the reasoning above, nothing else: no patch, label or kind-to-tests
+rule from them is in this repository.
+
+| kind | labeled | misses before | misses now | cost now / perfect knowledge |
+| --- | ---: | ---: | ---: | ---: |
+| one-line edits inside functions, all of sqlglot (operators, constants, arguments, deleted and inserted statements) | 36 | 0 | 0 | 304 s / 192 s |
+| class-level and module-level edits (dict entries, constants, defaults, decorators, imports) | 16 | 1 | 0 | 313 s / 245 s |
+| comments of every flavour (directives, coding cookies, inside strings, mis-indented, in `.sql`, TOML, YAML) | 14 | 0 | 0 | 35 s / 22 s |
+| refactors that change nothing (renamed local, moved method, reordered imports, docstrings) | 11 | 0 | 0 | 0 s / 0 s |
+| fixtures (every `tests/fixtures` folder, `# meta` lines, JSON, binary `.csv.gz`, deleted, renamed) | 13 | 0 | 0 | 119 s / 60 s |
+| test files, `tests/helpers.py`, `conftest.py`, package markers | 18 | 1 | 0 | 304 s / 188 s |
+| new, deleted, renamed and shadowing files | 14 | 1 | 0 | 282 s / 220 s |
+| `pyproject.toml`, `setup.cfg`, docs, CI | 13 | 0 | 0 | 151 s / 74 s |
+| files that no longer compile | 9 | 0 | 0 | 135 s / 135 s |
+| endless loops, sleeps, hangs in C code | 7 | 0 | 0 | 21 s / 19 s |
+| scripted definition-time edits (side effects at import, `__slots__`, `__init__.py` re-exports, metaclass code, enum order, base classes) | 20 | 2 | 0 | 377 s / 136 s |
+| several files, harmless and harmful parts mixed | 9 | 0 | 0 | 158 s / 84 s |
+| **all** | **180** | **5** | **0** | **2200 s / 1376 s** |
+
+The five misses, each an assumption that did not hold, and what replaced it:
+
+1. *"The import of the patched tree always answers."* A new
+   `sqlglot/_version.py` that raises makes `import sqlglot` fail (the pinned
+   `__init__.py` imports it under `try/except ImportError`); the comparison
+   died and nothing was selected. It now reports the failure and every test
+   is selected; a comparison that cannot run or be read leaves the commit its
+   broad candidates.
+2. *"A file without coverage runs for nobody."* `tests/__init__.py` is empty
+   at the pinned commit; a statement added there runs for every test.
+3. *"No recorded reader means no reader"* (three patches): a re-export
+   removed from `sqlglot/__init__.py` (the name is bound by an import, which
+   the read map does not track), and two `__slots__` edits (consumed by the
+   interpreter when the class is created, never loaded by name). See step 4.
+
+Found the same way, without a failing patch: the 19 lines of `maps/warm.json`
+(reached only through state another test leaves behind) and the coding
+cookie (decodes non-ASCII literals differently in untouched statements).
+`unit/test_generalization.py` has a regression test for each, built from the
+pinned source.
+
 ## Honest limits
 
 - **Coverage says a test ran the code, not that the edit changes its
@@ -212,9 +258,25 @@ the image as natively.
 - The maps were traced on macOS/arm64 with the kit's `requirements.lock`; the
   scorer is linux/amd64. Test ids and outcomes agree; a line executed only on
   one platform would be missed.
-- A patch that makes a test fail through state left behind by *another* test
-  (a polluted cache, a mutated global) is not modelled: tests are mapped as if
-  each ran alone.
+- State left behind by other tests is modelled only as far as the pinned
+  commit shows it: `maps/warm.json` holds the lines that left-over state leads
+  to in eight orders of the unpatched suite. A patch that makes one test
+  *leave different state* (a polluted cache, a mutated global) and thereby
+  breaks a later test that never runs the changed code is not modelled. The
+  suite is order-dependent already: four tests fail at the pinned commit when
+  it runs in reverse order.
+- Which tests fail when a module no longer imports depends on what the
+  process imported before (a test file that imports `sqlglot.errors` passes
+  if an earlier, failed `import sqlglot` left that submodule behind). The
+  selector takes every test that loads the module, a superset.
+- Values used without being loaded by name are covered for the cases named
+  in step 4 (`__slots__` and other dunders, decorated classes, `NamedTuple`,
+  `TypedDict`, `__all__`); another mechanism of that sort would be missed.
+- A definition-time statement that binds a name *and* changes process-wide
+  state on the side is compared by the value it binds only.
+- New `conftest.py`, pytest ini sections, side-effect statements at module
+  level and data files (`.csv.gz`) cannot be shown harmless: they select
+  everything that could see them, which is expensive when nothing fails.
 - Timeouts are modelled only as "the tests that execute the changed code".
 - `test_generator_memory` asserts on allocation counts and is sensitive to
   what ran before it in the same process; nothing here predicts that.
@@ -232,7 +294,7 @@ the image as natively.
 | `blast/` | `diffparse` (diff reader), `pydiff` (AST comparison), `analyze` (patch → candidate groups), `exact` + `snapshot_child` (import comparison), `choose`, `pack`, `maps` (map access), `config` (all constants) |
 | `maps/` | the maps of the pinned commit, plain JSON, 7.5 MB (`maps/README.md`, `maps/VERIFY.md`) |
 | `tools/` | map builders, the fingerprinting used by the import comparison, image build steps (`fetch_sqlglot.py`, `check_image.py`), `dev_eval.py` (measure the selector on labeled patches) |
-| `unit/` | unit tests |
+| `unit/` | unit tests (`test_generalization.py`: one regression test per unsound assumption found with made-up patches) |
 | `Dockerfile` | pinned base image; downloads sqlglot at the pinned commit from GitHub, compiles, fingerprints, self-checks |
 | `Makefile`, `score.py`, `SCORING.md`, `sample/` | the organizers' kit, for local checks (the Makefile only gained quotes around paths) |
 
