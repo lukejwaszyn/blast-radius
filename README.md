@@ -142,7 +142,7 @@ patched tree (`tools/dev_eval.py` prints selected vs failing for each):
 | the maps' own checks: class-level flags, numbers, `arg_types`, dict entries; five fixture files | 19 | 0 |
 | single-line mutations where key-level reads, lambda bodies and derived values decide (one-line lambdas, table entries, time mappings, `arg_types` keys) | 37 | 0 |
 | random single-line mutations anywhere in `sqlglot/` | 14 | 0 |
-| other kinds: test bodies, shared test helpers, test class attributes, syntax errors, re-indented lines, broken and removed imports, a module that raises at import, an added method, an added class attribute | 12 | 0 |
+| other kinds: test bodies, shared test helpers, test class attributes, syntax errors, re-indented lines, broken and removed imports, a module that raises at import, an added method, an added class attribute, an invalid encoding cookie, a class-level value that raises, an inserted statement | 15 | 0 |
 
 Most of the second to fourth sets were labeled on the tests that load the
 changed module rather than on the whole suite (a test that never loads the
