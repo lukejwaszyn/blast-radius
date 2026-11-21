@@ -23,6 +23,10 @@ MAX_WORKERS = 8
 # ------------------------------------------------- probabilities of groups
 # A test executed, at call time, a statement the patch changes or deletes.
 P_LINE_HIT = 0.45
+# The statement's only change is the operator of one comparison, to its neighbour (`is` -> `==`,
+# `<` -> `<=` ...), and maps/cmp.json recorded that both operators gave the same result every
+# time this test evaluated it: the patched line computes what the pinned line computed.
+P_OPERATOR_AGREED = 0.005
 # A test executed the statements next to a pure insertion inside a function.
 P_INSERT_NEIGHBOUR = 0.40
 # A test called a function whose signature, defaults or decorators changed.
@@ -52,6 +56,11 @@ P_NEW_NAME = 0.004
 P_NAME_MENTION = 0.50
 # An import statement now binds something else: tests running the module's code.
 P_IMPORT_REBIND = 0.35
+
+# A statement the patch adds or changes writes state that outlives its frame (an attribute of
+# an imported module or class, a module global, the environment; blast/state.py): every test
+# that runs later in the same process can see it, whether or not it runs the statement.
+P_STATE_LEAK = 0.25
 
 # Test files -----------------------------------------------------------------
 # A test's own body (or a helper it ran) changed.
@@ -115,7 +124,7 @@ BIG_TEST_MS = 1_500
 # "never":  static closure only.
 SNAPSHOT_POLICY = os.environ.get("BLAST_SNAPSHOT", "always")
 SNAPSHOT_MIN_SAVING_MS = 1_500
-SNAPSHOT_TIMEOUT_S = 8.0
+SNAPSHOT_TIMEOUT_S = float(os.environ.get("BLAST_SNAPSHOT_TIMEOUT", "8"))
 SNAPSHOT_PARALLEL = 2
 
 # ------------------------------------------------------------------ limits

@@ -27,8 +27,28 @@ from . import config as C
 from .diffparse import ApplyError, FileChange, apply_hunks, parse_patch
 from .maps import Maps
 from .pydiff import Mark, bound_names, diff_python, parse_source
+from .state import changed_writers, new_write_targets, writers
 
-_PYTEST_INI_FILES = ("pytest.ini", ".pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml")
+_PYTEST_INI_FILES = ("pytest.ini", ".pytest.ini", "pytest.toml", ".pytest.toml", "tox.ini", "setup.cfg", "pyproject.toml")
+# pytest takes its configuration (and its rootdir, hence every test id) from the first of these it
+# finds in the common ancestor of its arguments or above: the checkout's root for a bare `pytest`,
+# tests/ for `pytest tests`.  Which of the two the labeling run used is not known.
+_PYTEST_CONFIG_DIRS = ("", "tests")
+# foo.so, foo.abi3.so, foo.cpython-313-x86_64-linux-gnu.so, foo.pyd: an extension module `foo`
+_EXTENSION_FILE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\.(?:[A-Za-z0-9_-]+\.)?(?:so|pyd)$")
+
+
+def collected_by_pytest(path: str) -> bool:
+    """A file pytest's default patterns pick up (test_*.py, *_test.py) when it walks the checkout or tests/."""
+    base = os.path.basename(path)
+    if not (base.endswith(".py") and (base.startswith("test_") or base.endswith("_test.py"))):
+        return False
+    return not any(part.startswith(".") or part in ("build", "dist", "node_modules", "venv", "__pycache__") or part.endswith(".egg")
+                   for part in path.split("/")[:-1])
+
+
+def is_pytest_config(path: str) -> bool:
+    return os.path.basename(path) in _PYTEST_INI_FILES and os.path.dirname(path) in _PYTEST_CONFIG_DIRS
 _PYTEST_WORDS = re.compile(
     r"\[tool\.pytest|\[pytest\]|\[tool:pytest\]|\baddopts\b|\btestpaths\b|\bfilterwarnings\b|\bpython_files\b|"
     r"\bpython_classes\b|\bpython_functions\b|\bminversion\b|\brequired_plugins\b|\bxfail_strict\b|\bnorecursedirs\b|"
@@ -180,7 +200,7 @@ class Analyzer:
                 an.add(p, maps.all_mask, f"{path}: {why}")
         else:
             mask = maps.opener_tests(path)
-            if os.path.basename(path) in _PYTEST_INI_FILES and "/" not in path:
+            if is_pytest_config(path):
                 mask = maps.all_mask
             an.add(p, mask, f"{path}: {why}: tests that open the file")
 
@@ -307,7 +327,7 @@ class Analyzer:
     def data_file(self, an: Analysis, path: str, old_text: str, new_text: str):
         maps = self.maps
         base = os.path.basename(path)
-        if "/" not in path and base in _PYTEST_INI_FILES:
+        if is_pytest_config(path):
             self.pytest_config(an, path, old_text, new_text)
             return
         if path.startswith("sqlglotc/"):
@@ -360,6 +380,15 @@ class Analyzer:
             except Exception as exc:
                 problem = f"not valid TOML ({exc})"
                 has_section = False
+        elif base in ("pytest.toml", ".pytest.toml"):
+            # pytest 9: a configuration file of its own, used even when it is empty
+            has_section = True
+            try:
+                import tomllib
+
+                tomllib.loads(new_text)
+            except Exception as exc:
+                problem = f"not valid TOML ({exc})"
         else:
             problem, has_section = _ini_problem(new_text, base)
         if problem:
@@ -369,8 +398,11 @@ class Analyzer:
         new_lines = set(new_text.split("\n"))
         changed = [ln for ln in (old_lines ^ new_lines) if ln.strip()]
         old_has = bool(old_text) and bool(re.search(r"\[tool\.pytest|\[pytest\]|\[tool:pytest\]", old_text))
-        if base in ("pytest.ini", ".pytest.ini") and old_text is None and any(
-                ln.strip() and not ln.strip().startswith(("#", ";", "[")) for ln in new_text.split("\n")):
+        if base in ("pytest.ini", ".pytest.ini") and old_text is None and (os.path.dirname(path) or any(
+                ln.strip() and not ln.strip().startswith(("#", ";", "[")) for ln in new_text.split("\n"))):
+            # (in tests/ even an empty one matters: it moves pytest's rootdir, and with it every test id)
+            has_section = True
+        if os.path.dirname(path) and base in ("pytest.toml", ".pytest.toml") and old_text is None:
             has_section = True
         if has_section or old_has or any(_PYTEST_WORDS.search(ln) for ln in changed):
             an.add(C.P_PYTEST_CONFIG, maps.all_mask, f"{path}: pytest configuration changed")
@@ -399,7 +431,7 @@ class Analyzer:
                 an.add(0.3, self.tests_under(os.path.dirname(path)), f"{path}: package marker / conftest removed")
             an.add(C.P_TEST_FILE_BROKEN, mask, f"{path}: file removed: its tests and the tests that import it")
         else:
-            if "/" not in path and os.path.basename(path) in _PYTEST_INI_FILES:
+            if is_pytest_config(path):
                 self.pytest_config(an, path, self.src.read(path), None)
                 return
             an.add(C.P_FIXTURE_GONE, maps.opener_tests(path), f"{path}: file removed: tests that open it")
@@ -415,9 +447,33 @@ class Analyzer:
         if base == "conftest.py":
             an.add(C.P_PYTEST_CONFIG, self.tests_under(os.path.dirname(path)), f"{path}: new conftest.py")
             return
-        if len(parts) == 1 and base in _PYTEST_INI_FILES:
+        if is_pytest_config(path):
             self.pytest_config(an, path, None, text or "")
             return
+        extension = _EXTENSION_FILE.match(base)
+        if extension:
+            # The import system looks for an extension module before a .py file of the same name
+            # (and before __init__.py inside a package); a package directory still comes first.
+            stem = extension.group(1)
+            directory = os.path.dirname(path)
+            prefix = directory + "/" if directory else ""
+            sibling = prefix + stem + ".py"
+            if stem == "__init__" and directory and self.src.exists(prefix + "__init__.py"):
+                sibling = prefix + "__init__.py"
+            elif self.src.exists(prefix + stem + "/__init__.py"):
+                sibling = ""
+            if sibling and self.src.exists(sibling):
+                module = maps.module_of(sibling) or ""
+                mask = maps.module_tests(module) | maps.file_line_tests(sibling) | maps.tests_in_file(sibling) | maps.text_reader_tests(sibling)
+                if sibling.endswith("__init__.py"):
+                    mask |= maps.package_tests(module) | self.tests_under(directory)
+                an.add(C.P_SHADOWS_MODULE, mask, f"{path}: an extension module of this name is found before {sibling}: tests that load it")
+                return
+            if not directory and stem not in ("sqlglot", "tests", "sqlglotc") and (
+                    stem in getattr(sys, "stdlib_module_names", ()) or stem in _THIRD_PARTY):
+                an.add(C.P_SHADOWS_MODULE, maps.all_mask,
+                       f"{path}: the checkout is on PYTHONPATH, so this extension module shadows `{stem}`")
+                return
         top = parts[0][:-3] if len(parts) == 1 and parts[0].endswith(".py") else parts[0]
         if len(parts) == 1 and top in ("sitecustomize", "usercustomize"):
             an.add(C.P_SHADOWS_MODULE, maps.all_mask, f"{path}: imported at interpreter start-up from PYTHONPATH")
@@ -456,6 +512,19 @@ class Analyzer:
                 an.add(0.2, self.tests_under(os.path.dirname(path)), f"{path}: new package marker in the test tree")
             else:
                 an.notes.append(f"{path}: new test file; its tests have no number")
+        if collected_by_pytest(path) and text is not None:
+            # pytest imports the file with all the others and runs its (unnumbered) tests in the
+            # same process as the numbered ones: what it writes to shared state they all see.
+            try:
+                leaks = writers(ast.parse(text.encode("utf-8", "surrogateescape")))
+            except (SyntaxError, ValueError, RecursionError):
+                leaks = []
+            if leaks:
+                an.add(C.P_STATE_LEAK, maps.all_mask,
+                       f"{path}: new test file writes state shared by the whole process "
+                       f"({', '.join(sorted({scope or '<module>' for scope, _w, _d in leaks})[:3])})")
+            return
+        if cat == "test":
             return
         an.notes.append(f"{path}: new file nothing reads")
 
@@ -493,7 +562,12 @@ class Analyzer:
             return
         if diff.same_ast:
             an.notes.append(f"{path}: comments / blank lines / layout only (same AST)")
-            an.add(C.P_TEXT_READER_COMMENT, readers, f"{path}: read as text by these tests; only comments changed")
+            if readers and not same_tree_as_text(old_text, new_text):
+                # The interpreter strips a byte order mark and honours a coding cookie; a test that
+                # reads the file itself and parses the text gets neither.
+                an.add(C.P_TEXT_READER_CODE, readers, f"{path}: read as text by these tests; the text no longer parses to the same tree")
+            else:
+                an.add(C.P_TEXT_READER_COMMENT, readers, f"{path}: read as text by these tests; only comments changed")
             return
         for name in diff.equivalent:
             an.notes.append(f"{path}: def {name} compiles to the same bytecode (only names of locals / layout of constants differ)")
@@ -507,11 +581,25 @@ class Analyzer:
             for mark in diff.marks:
                 ctx.mark(mark)
             ctx.finish()
+            # An existing write to shared state is covered by line coverage (recorded for each test
+            # alone: a test that reads such state without writing it first would find it empty).
+            # A write through a target the function did not write before is new shared state.
+            leaks = new_write_targets(diff.old_tree, diff.new_tree)
+            if leaks and (maps.module_tests(maps.module_of(path) or "") or maps.file_line_tests(path)):
+                an.add(C.P_STATE_LEAK, maps.all_mask,
+                       f"{path}: {', '.join(leaks[:3])} now writes state shared by the whole process: tests that run later can see it")
         elif cat == "test" or maps.covered(path):
             ctx = _TestFile(self, an, path, old_text, applied, diff)
             for mark in diff.marks:
                 ctx.mark(mark)
             ctx.finish()
+            # Test files are all imported into the process before the first test runs, and tests
+            # share the process: a changed write to an imported module or class reaches them all.
+            leaks = changed_writers(diff.old_tree, diff.new_tree)
+            if leaks and (self.test_dependents(path) or maps.file_line_tests(path)):
+                an.add(C.P_STATE_LEAK, maps.all_mask,
+                       f"{path}: a statement writing state shared by the whole process was added, removed or changed "
+                       f"({', '.join(leaks[:3])}): tests that run later can see it")
         else:
             an.notes.append(f"{path}: Python file no test executes")
 
@@ -747,6 +835,14 @@ class Analyzer:
                 if not maps.in_function_body(path, number):
                     def_time = True
         return mask, def_time
+
+
+def same_tree_as_text(old_text: str, new_text: str) -> bool:
+    """Does the file, read as UTF-8 text (not as source bytes), still parse to the same tree?"""
+    try:
+        return ast.dump(ast.parse(old_text)) == ast.dump(ast.parse(new_text))
+    except (SyntaxError, ValueError, RecursionError):
+        return False
 
 
 _CODING = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
@@ -1048,6 +1144,34 @@ class _SrcFile(_FileCtx):
                     names = [f"{cls}|{a}" for a in (info["set_at_class_creation"] if info else [])]
                 self.static_closure(names, None, f"{path}:{lo}-{hi} ran at import for {site}", fallback_only=True)
 
+    def operator_swap(self, m: Mark) -> bool:
+        """`a is b` -> `a == b` and the like: split the tests that ran the line into those in which
+        the two operators ever disagreed (maps/cmp.json) and those in which they never did.  False
+        when the map does not cover the site, or when the line also runs while sqlglot is imported
+        and the operators disagreed somewhere (then the usual, coarser path applies)."""
+        maps, an, path = self.maps, self.an, self.path
+        line, col, old_op, new_op = m.info["swap"]
+        differs = maps.neighbour_differs(path, line, col, old_op, new_op)
+        if differs is None:
+            return False
+        if differs and maps.ran_at_import(path, m.lo, m.hi):
+            # Evaluated while sqlglot is imported, with another result at least once: what the
+            # import defines may differ, which reaches further than the tests that ran the line.
+            # (With an empty set no process of the recording ever saw a difference, import included.)
+            return False
+        ran = maps.line_tests(path, m.lo, m.hi)
+        # The record is of each test running alone.  A test that reaches the line only through
+        # state other tests leave behind (maps/warm.json) was never seen evaluating it.
+        alone = maps.call_tests(path, m.lo, m.hi, warm=False)
+        an.add(C.P_LINE_HIT, ran & differs,
+               f"{path}:{m.lo}-{m.hi}: tests that executed this code and in which `{new_op}` gave another result than the pinned operator")
+        an.add(C.P_LINE_HIT, ran & ~alone & ~differs,
+               f"{path}:{m.lo}-{m.hi}: tests that reach this code only after other tests (no record of the comparison)")
+        an.add(C.P_OPERATOR_AGREED, alone & ~differs,
+               f"{path}:{m.lo}-{m.hi}: tests that executed this code; `{new_op}` gave the same result as the pinned operator "
+               "every time they evaluated the comparison")
+        return True
+
     def exact(self, reason: str, const_only: bool = False):
         req = self.an.want_exact(reason, const_only)
         req.files[self.path] = self.applied.new_text()
@@ -1056,6 +1180,8 @@ class _SrcFile(_FileCtx):
     def mark(self, m: Mark):
         an, maps, path = self.an, self.maps, self.path
         kind = m.kind
+        if kind in ("call", "lambda") and m.info.get("swap") and self.operator_swap(m):
+            return
         if kind == "call":
             p = C.P_INSERT_NEIGHBOUR if m.info.get("why") == "neighbour" else C.P_LINE_HIT
             self.call(m.lo, m.hi, p, m.info.get("why", ""))

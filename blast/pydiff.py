@@ -178,6 +178,37 @@ def _sites(a, b, trail, out):
             return
 
 
+_CMP_NAMES = {ast.Is: "is", ast.IsNot: "isnot", ast.Lt: "lt", ast.LtE: "le", ast.Gt: "gt", ast.GtE: "ge"}
+_CMP_SYMBOLS = {ast.Eq: "==", ast.NotEq: "!=", ast.Lt: "<", ast.LtE: "<=", ast.Gt: ">", ast.GtE: ">="}
+
+
+def operator_swap(pairs):
+    """pairs: [(old node, new node)] that together are all that changed in a statement.
+    -> (line, column, old operator name, new operator symbol) when the *only* difference is the
+    operator of one two-operand comparison (`a is b` -> `a == b`, `a < b` -> `a <= b`), else None.
+    Line and column are those of the comparison in the old file (the key of maps/cmp.json)."""
+    sites: list = []
+    for a, b in pairs:
+        if a is None or b is None:
+            return None
+        _sites(a, b, [], sites)
+        if len(sites) > 1:
+            return None
+    if len(sites) != 1:
+        return None
+    trail, new_node = sites[0]
+    old_node = trail[-1]
+    if not isinstance(old_node, ast.cmpop) or not isinstance(new_node, ast.cmpop) or len(trail) < 2:
+        return None
+    compare = trail[-2]
+    if not isinstance(compare, ast.Compare) or len(compare.ops) != 1:
+        return None
+    old_name, new_symbol = _CMP_NAMES.get(type(old_node)), _CMP_SYMBOLS.get(type(new_node))
+    if old_name is None or new_symbol is None:
+        return None
+    return (compare.lineno, compare.col_offset, old_name, new_symbol)
+
+
 _NAME_INTROSPECTION = {"locals", "vars", "eval", "exec", "dir", "_getframe", "currentframe", "f_locals", "inspect"}
 
 
@@ -221,6 +252,61 @@ def same_bytecode(old_def, new_def) -> bool:
     if names(a) & _NAME_INTROSPECTION and a.co_varnames != b.co_varnames:
         return False
     return _code_shape(a) == _code_shape(b)
+
+
+_GENERATOR_FLAGS = 0x20 | 0x80 | 0x100 | 0x200  # generator, coroutine, iterable coroutine, async generator
+_GLOBAL_OPS = {"LOAD_GLOBAL", "STORE_GLOBAL", "DELETE_GLOBAL", "LOAD_NAME", "STORE_NAME", "DELETE_NAME"}
+
+
+def _name_classes(code):
+    """(local names, free names, global names) of one code object."""
+    import dis
+
+    local = set(code.co_varnames) | set(code.co_cellvars)
+    free = set(code.co_freevars)
+    glob = {i.argval for i in dis.get_instructions(code) if i.opname in _GLOBAL_OPS and isinstance(i.argval, str)}
+    return local, free, glob - local - free
+
+
+def _scope_shift(a, b) -> str | None:
+    """Did the meaning of a name, or the kind of function, change between two code objects?
+
+    One statement can change what *other*, untouched lines of the same function do: an assignment
+    makes its target a local of the whole function (every earlier read of the global of that name
+    now raises UnboundLocalError), a `yield` anywhere turns the function into a generator, a
+    `global` or `nonlocal` declaration redirects every use of the name.  The changed line need not
+    even be executed for that."""
+    if (a.co_flags ^ b.co_flags) & _GENERATOR_FLAGS:
+        return "the function became (or stopped being) a generator / coroutine"
+    la, fa, ga = _name_classes(a)
+    lb, fb, gb = _name_classes(b)
+    moved = (la & (fb | gb)) | (fa & (lb | gb)) | (ga & (lb | fb))
+    if moved:
+        return "the scope of `" + "`, `".join(sorted(moved)[:3]) + "` changed (local / closure / global)"
+    inner_a = [c for c in a.co_consts if hasattr(c, "co_code")]
+    inner_b = [c for c in b.co_consts if hasattr(c, "co_code")]
+    if [c.co_name for c in inner_a] == [c.co_name for c in inner_b]:
+        for x, y in zip(inner_a, inner_b):
+            why = _scope_shift(x, y)
+            if why:
+                return why
+    return None
+
+
+def scope_shift(old_def, new_def) -> str | None:
+    """`_scope_shift` for two versions of a def given as AST nodes (None when either does not compile:
+    that case is reported as a broken file elsewhere)."""
+    try:
+        codes = []
+        for node in (old_def, new_def):
+            module = compile(ast.Module(body=[node], type_ignores=[]), "<scope>", "exec", dont_inherit=True)
+            inner = [c for c in module.co_consts if hasattr(c, "co_code") and c.co_name == node.name]
+            if len(inner) != 1:
+                return None
+            codes.append(inner[0])
+    except (SyntaxError, ValueError, RecursionError):
+        return None
+    return _scope_shift(codes[0], codes[1])
 
 
 def _no_op(stmt) -> bool:
@@ -444,6 +530,10 @@ class _Walker:
                 self.res.no_op_changes = True
                 self.res.equivalent.append(qual)
                 return
+            shift = scope_shift(o, n)
+            if shift:
+                # other lines of the function now mean something else: whoever runs any of it
+                self.mark("call", o.body[0].lineno, o.end_lineno, qual, why="whole function: " + shift)
             self.to_compile.append(n)
         elif outer and (name_changed or deco_changed or sig_changed or params_changed or ann_changed):
             self.to_compile.append(n)
@@ -501,7 +591,18 @@ class _Walker:
             return
         if header(o) != header(n):
             if ctx.in_func:
-                self.mark("call", o.lineno, self._header_end(o), ctx.func, why="header")
+                parts = []
+                for name in o._fields:
+                    if name in _BODY_FIELDS or name in ("handlers", "cases"):
+                        continue
+                    vo, vn = getattr(o, name, None), getattr(n, name, None)
+                    if isinstance(vo, list) and isinstance(vn, list) and len(vo) == len(vn):
+                        parts.extend(zip(vo, vn))
+                    elif isinstance(vo, ast.AST) and isinstance(vn, ast.AST):
+                        parts.append((vo, vn))
+                    elif vo != vn:
+                        parts.append((None, None))
+                self.mark("call", o.lineno, self._header_end(o), ctx.func, why="header", swap=operator_swap(parts))
             else:
                 self.mark("block", first_line(o), o.end_lineno, ctx.scope, op="change",
                           names=sorted(set(bound_names([o]) + bound_names([n]))))
@@ -533,7 +634,7 @@ class _Walker:
 
     def _leaf(self, o, n, ctx):
         if ctx.in_func:
-            self.mark("call", o.lineno, o.end_lineno, ctx.func, why="statement")
+            self.mark("call", o.lineno, o.end_lineno, ctx.func, why="statement", swap=operator_swap([(o, n)]))
             return
         self.to_compile.append(n)
         if isinstance(o, (ast.Import, ast.ImportFrom)):
@@ -551,7 +652,8 @@ class _Walker:
                     lam = trail[i]
                     break
             if lam is not None:
-                self.mark("lambda", lam.body.lineno, lam.body.end_lineno, ctx.scope, stmt=(o.lineno, o.end_lineno))
+                self.mark("lambda", lam.body.lineno, lam.body.end_lineno, ctx.scope, stmt=(o.lineno, o.end_lineno),
+                          swap=operator_swap([(o, n)]) if len(sites) == 1 else None)
             else:
                 def_sites.append((trail, new_node))
         if not def_sites:
