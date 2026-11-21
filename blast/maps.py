@@ -135,6 +135,25 @@ class Maps:
             mask |= self.warm_tests(rel, lo, hi)
         return mask
 
+    # --------------------------------------------- neighbouring operators
+    def neighbour_differs(self, rel: str, line: int, col: int, old_op: str, new_op: str) -> int | None:
+        """Tests in which the comparison at rel:line:col (operator `old_op`, e.g. "is") gave, at least
+        once, another result than `new_op` (e.g. "==") would have on the same operands (cmp.json).
+        None when the map has nothing to say: no such site, another operator pair, no map."""
+        if not os.path.exists(os.path.join(self.root, "cmp.json")):
+            return None
+        table = self.load("cmp")
+        if table["neighbour"].get(old_op) != new_op:
+            return None
+        index = self._json.get("cmp:index")
+        if index is None:
+            index = {name: {(row[0], row[1]): row for row in rows} for name, rows in table["files"].items()}
+            self._json["cmp:index"] = index
+        row = index.get(rel, {}).get((line, col))
+        if row is None or row[2] != old_op:
+            return None
+        return self._set("cmp", row[3])
+
     def warm_lines(self) -> list[tuple[str, int, int]]:
         """[(file, line, tests)] of maps/warm.json."""
         self.warm_tests("", 0, 0)

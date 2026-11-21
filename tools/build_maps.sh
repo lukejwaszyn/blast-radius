@@ -42,6 +42,11 @@ mkdir -p "$WORK/rawB"
 "$PY" "$T/aggregate.py" --tests "$TESTS" --static "$WORK/static" --src "$SRC" \
     --lines "$WORK/rawA" "$WORK/rawA_s1" --imports "$WORK/rawI" \
     --reads "$WORK/rawB" "$WORK/rawB_s1" --out "$OUT"
+# 5b. comparisons pass: does the neighbouring operator (`is` / `==`, `<` / `<=` ...) ever give another result?
+"$PY" "$T/instrument_cmp.py" --src "$SRC" --out "$WORK/cmp_inst"
+"$PY" "$T/run_trace.py" --src "$SRC" --python "$PY" --out "$WORK/rawC"    --jobs "$JOBS" --cmp --instrumented "$WORK/cmp_inst" --seed 0
+"$PY" "$T/run_trace.py" --src "$SRC" --python "$PY" --out "$WORK/rawC_s1" --jobs "$JOBS" --cmp --instrumented "$WORK/cmp_inst" --seed 1
+"$PY" "$T/aggregate_cmp.py" --tests "$TESTS" --sites "$WORK/cmp_inst/blast_cmp_sites.json" --raw "$WORK/rawC" "$WORK/rawC_s1" --out "$OUT"
 # 6. lines that only left-over state of earlier tests leads to (whole suite in one process, 8 orders, about 20 minutes)
 "$PY" "$T/warm_trace.py" --src "$SRC" --python "$PY" --work "$WORK" --maps "$OUT"
 echo "maps written to $OUT"

@@ -11,6 +11,10 @@ Raw results are JSON files in --out; tools/aggregate.py turns them into maps/.
 --reads runs the second pass: the tests import an instrumented copy of sqlglot
 (made by tools/instrument.py) that reports which class-level / module-level
 attributes and dict keys are read.
+
+--cmp runs the comparisons pass on the copy made by tools/instrument_cmp.py:
+for every `is` / `is not` / `<` / `<=` / `>` / `>=` inside a function, did the
+neighbouring operator ever give another result in this test?
 """
 
 from __future__ import annotations
@@ -54,7 +58,8 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--reads", action="store_true")
-    ap.add_argument("--instrumented", help="instrumented tree (with --reads)")
+    ap.add_argument("--cmp", action="store_true", help="comparisons pass (tree made by tools/instrument_cmp.py)")
+    ap.add_argument("--instrumented", help="instrumented tree (with --reads or --cmp)")
     ap.add_argument("--only", nargs="*", help="only these test files")
     ap.add_argument("--seed", default="0", help="PYTHONHASHSEED of the test processes (set order can change paths)")
     args = ap.parse_args()
@@ -67,7 +72,7 @@ def main() -> None:
     with open(os.path.join(out, "files.json"), "w") as fh:
         json.dump(files, fh)
 
-    run_root = os.path.realpath(args.instrumented) if args.reads else src
+    run_root = os.path.realpath(args.instrumented) if (args.reads or args.cmp) else src
     env = dict(os.environ)
     env.update(
         PYTHONPATH=os.pathsep.join([run_root, TRACER]),
@@ -82,8 +87,12 @@ def main() -> None:
         OBJC_DISABLE_INITIALIZE_FORK_SAFETY="YES",  # macOS: allow fork() after numpy/duckdb
     )
     env.pop("BLAST_CTX", None)
+    env.pop("BLAST_READS", None)
+    env.pop("BLAST_CMP", None)
     if args.reads:
         env["BLAST_READS"] = "1"
+    if args.cmp:
+        env["BLAST_CMP"] = "1"
 
     todo = args.only or test_files(src)
 

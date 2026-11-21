@@ -169,8 +169,8 @@ def start():
         return
     _started = True
     _prefix = os.path.realpath(ROOT).rstrip(os.sep) + os.sep
-    if os.environ.get("BLAST_READS"):
-        return  # the "reads" pass records through the rewritten sources, not through lines
+    if os.environ.get("BLAST_READS") or os.environ.get("BLAST_CMP"):
+        return  # the "reads" and "comparisons" passes record through the rewritten sources, not through lines
     with open(os.path.join(OUT, "files.json")) as fh:
         for i, rel in enumerate(json.load(fh)):
             _file_ids[rel] = i
@@ -193,7 +193,7 @@ def reset():
     imp.clear()
     opens_body.clear()
     opens_imp.clear()
-    if not os.environ.get("BLAST_READS"):
+    if not (os.environ.get("BLAST_READS") or os.environ.get("BLAST_CMP")):
         _mon.restart_events()
 
 

@@ -27,7 +27,10 @@ modules it loaded and the files it opened.
 
 2. **Python files: compare the two syntax trees** (`blast/pydiff.py`).
    - Equal trees: only comments, blank lines or layout changed. Nothing can
-     run differently. (A "comment" inside a string
+     run differently. (A test that reads the file as *text* and parses it
+     itself is another matter: `tests/test_typing.py` does that with
+     `sqlglot/typing/*.py`, and a byte order mark that the interpreter skips
+     makes its `ast.parse` fail. Such readers are in `maps/opens.json`.) (A "comment" inside a string
      or a re-indented line are not equal trees and are treated as code.)
      One comment is not a comment: a coding cookie
      (`# -*- coding: latin-1 -*-`) changes how every non-ASCII literal of the
@@ -53,11 +56,31 @@ modules it loaded and the files it opened.
    call-time code too: its line lists the tests that *called* it. (The maps
    record function entry as well as line events for exactly this case: a
    one-line lambda never produces a line event when called.)
+   A statement can also change what *other, untouched* lines of its function
+   do: an assignment makes its target a local of the whole function (every
+   earlier read of the global of that name now raises `UnboundLocalError`), a
+   `yield` turns the function into a generator, a `global` declaration
+   redirects every use of the name. The changed line need not even run. The
+   old and the new function are compiled and the scope of every name and the
+   kind of function compared (`blast/pydiff.py::scope_shift`); if they differ,
+   every test that runs any line of the function is a candidate.
    Coverage is recorded for each test alone; `maps/warm.json` adds the few
    lines that a test reaches only through state an earlier test left behind
    (a test file clears the dialect registry in its `setUp`), found by
    running the whole suite in one process in eight orders. For those lines
    every test that runs the enclosing function is a candidate.
+
+   **A comparison operator replaced by its neighbour** (`is` → `==`,
+   `is not` → `!=`, `<` → `<=`, `<=` → `<`, `>` → `>=`, `>=` → `>`) is the one
+   edit whose effect was measured ahead for every test: `maps/cmp.json` holds,
+   for each such comparison inside a function of sqlglot, the tests in which
+   the neighbouring operator gave another result at least once on the operands
+   the test produced. When that operator is the only thing a statement
+   changes, a test outside the set computes the same value at that place every
+   time, so it runs exactly as before; only the tests inside the set are taken
+   as hit. (The others keep a 0.5 % weight: they ride along only when a worker
+   is open anyway.) A line that also runs while sqlglot is imported is pruned
+   this way only if no process of the recording saw a difference at all.
 
 4. **Definition-time code → who reads the value.** A class-level edit such as
    `WEEK_OFFSET = -1` is executed by every test that imports the module, and
@@ -107,6 +130,19 @@ modules it loaded and the files it opened.
    executes nothing. For the definition-time ones the import comparison still
    runs.
 
+   **Writes to shared state.** Line coverage says who runs a statement. A
+   statement that writes to something the whole process shares (an attribute
+   or item of an imported module or class, a module global, the environment,
+   a registry it pops from; `blast/state.py`) also reaches every test that
+   runs *after* it. In sqlglot's own functions an existing write is already
+   covered (coverage was recorded for each test alone: a test that reads such
+   state finds it empty and writes it itself), so only a write through a
+   target the function did not write before selects every test. In test files
+   any added, removed or changed write of that kind does (all test files are
+   imported into the process before the first test runs, and a test's
+   leftovers are seen by the tests after it), and so does a new test file that
+   contains one.
+
 5. **Test files** are handled by the same two questions, because coverage was
    recorded for `tests/**` as well: a changed test body or helper selects the
    tests that executed it; a changed module-level or class-level line selects
@@ -123,16 +159,21 @@ modules it loaded and the files it opened.
    filter (`tests/helpers.py::_filter_comments` drops empty lines and lines
    starting with `--`): if the filtered text is unchanged no test can see the
    edit; a changed `# title:` / `# dialect:` line or SQL comment is a real
-   change. `pyproject.toml`, `setup.cfg`, `pytest.ini`, `tox.ini` and
-   `conftest.py` are what pytest reads at start-up: a file that no longer
+   change. `pyproject.toml`, `setup.cfg`, `pytest.ini`, `.pytest.ini`,
+   `pytest.toml`, `.pytest.toml` (pytest 9), `tox.ini` and `conftest.py`, at
+   the root or in `tests/` (pytest looks in the common ancestor of its
+   arguments, and the labeling command is not known), are what pytest reads at
+   start-up: a file that no longer
    parses or a changed pytest section reaches every test, other metadata
    reaches none. Docs, CI files and files no test opens select nothing.
 
 7. **New, deleted and renamed files**: a deleted or renamed module breaks the
    tests that load it; a deleted fixture breaks the tests that open it; a new
    file matters if it shadows an importable module (the checkout is on
-   `PYTHONPATH`), is picked up by pytest (`conftest.py`, `pytest.ini`), or
-   lands in a directory some test lists.
+   `PYTHONPATH`; a package directory wins over a module file, and an
+   extension module `x.so` / `x.abi3.so` is found before `x.py`), is picked
+   up by pytest (`conftest.py`, a configuration file, a `test_*.py` that
+   writes shared state), or lands in a directory some test lists.
 
 8. **Choose by expected cost** (`blast/choose.py`). Every group of candidates
    carries the probability that a test in it fails, given only the *reason*

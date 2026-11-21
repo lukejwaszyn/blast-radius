@@ -10,7 +10,8 @@ pytest process.
   therefore part of the test.  The fork writes "t.<slug>.<n>.json".
 
 With $BLAST_READS set the same plugin records attribute/key reads instead of
-lines (see blast_reads.py).
+lines (see blast_reads.py); with $BLAST_CMP, the comparison sites whose
+neighbouring operator disagreed (see blast_cmp.py).
 """
 
 from __future__ import annotations
@@ -27,6 +28,9 @@ import blast_trace as bt
 READS = bool(os.environ.get("BLAST_READS"))
 if READS:
     import blast_reads as br
+CMP = bool(os.environ.get("BLAST_CMP"))
+if CMP:
+    import blast_cmp as bc
 
 _slug = None
 _index = 0
@@ -49,6 +53,8 @@ def pytest_collection_finish(session):
     )
     if READS:
         extra["reads"] = br.snapshot()
+    if CMP:
+        extra["cmp"] = bc.snapshot()
     bt.dump(f"file.{_slug}.json", **extra)
 
 
@@ -89,6 +95,8 @@ def pytest_runtest_protocol(item, nextitem):
         bt.reset()
         if READS:
             br.reset()
+        if CMP:
+            bc.reset()
         start = time.time()
         from _pytest.runner import runtestprotocol
 
@@ -116,6 +124,8 @@ def pytest_runtest_protocol(item, nextitem):
         )
         if READS:
             extra["reads"] = br.snapshot()
+        if CMP:
+            extra["cmp"] = bc.snapshot()
         bt.dump(name + ".json", **extra)
         code = 0
     except BaseException as exc:  # never return into pytest's loop from the child

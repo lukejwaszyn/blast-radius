@@ -228,6 +228,35 @@ used all the same.
 executed selects nothing" stays true only for lines that no test executes in a
 shared process either.
 
+### cmp.json — comparisons whose neighbouring operator gives another result
+
+```json
+{"neighbour": {"is": "==", "isnot": "!=", "lt": "<=", "le": "<", "gt": ">=", "ge": ">"},
+ "files": {"sqlglot/x.py": [[line, column, "is", set id], ...]},
+ "sets": ["0-5,9", ...]}
+```
+
+One row for every two-operand comparison with one of these six operators that
+sits inside a function or lambda body of `sqlglot/` (line and column of the
+comparison in the pinned source). Its set is the tests in which the
+*neighbouring* operator gave, at least once, another result than the pinned
+operator on the same two operands (or raised, or did not return a plain
+`True` / `False`): in the test itself, in a subprocess it started, or while
+its test file was being imported.
+
+Use: a patch whose only change to a statement is `a is b` → `a == b` (or
+`<` → `<=` ...) leaves every test *outside* that set exactly as it was: each
+time such a test evaluated the comparison, both operators gave the same
+value, so the patched line computed what the pinned line computed and the
+test ran on identically. Tests *inside* the set saw a different value at
+least once. A site that also runs while sqlglot is imported (`defdeps.json`)
+can change what the import defines, which reaches further than the tests that
+ran the line: prune there only when the set is empty (no process of the
+recording, the importing ones included, ever saw a difference).
+
+Built like the other per-test maps (fork per test, two hash seeds united);
+see `tools/README.md`.
+
 ## From a patch to candidate tests
 
 The order in which `tools/verify_samples.py` consults the maps (it is a checker,
