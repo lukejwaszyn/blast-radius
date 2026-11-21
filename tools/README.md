@@ -28,6 +28,8 @@ beyond the kit's `requirements.lock` is used.
 | `snapshot.py` | fingerprints every class-level / module-level value of a sqlglot tree and compares two fingerprints: names the values (and dict keys) a definition-time edit really changes, derived ones included, in the vocabulary of `reads.json` |
 | `verify_samples.py` | replays patches with known answers against the maps and prints, per patch, candidate-set sizes per map and which map catches each failing test (results: `maps/VERIFY.md`) |
 | `dev_check_mutations.py` | development check: generates single-line edits of definition-time lines, has a labeler run the full suite on them and checks the failing tests are inside the maps' answer |
+| `fetch_sqlglot.py`, `check_image.py` | image build steps: download sqlglot at the pinned commit; check that the checkout matches the maps and that the selector answers three made-up patches sensibly |
+| `dev_eval.py` | development check of the selector: run it on patches with known failing tests (the kit's sample, or patches labeled by running the suite) and print selected vs failing, cost vs perfect-knowledge cost, misses |
 | `mapfmt.py` | the range-string encoding of test sets |
 | `tracer/` | `sitecustomize.py` (switches tracing on in every process, subprocesses of tests included), `blast_trace.py` (lines, opens), `blast_pytest.py` (fork per test), `blast_reads.py` (reads) |
 

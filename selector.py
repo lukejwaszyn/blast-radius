@@ -37,10 +37,18 @@ def duration_ms(seconds: float) -> int:
 class Run:
     def __init__(self):
         self.t0 = time.monotonic()
-        with open(os.path.join(C.DATA_DIR, "tests.json"), "rb") as fh:
-            tests = json.load(fh)["tests"]
-        self.number_ms = {t["number"]: duration_ms(t["seconds"]) for t in tests}
         self.maps = Maps(C.MAPS_DIR)
+        try:
+            with open(os.path.join(C.DATA_DIR, "tests.json"), "rb") as fh:
+                tests = json.load(fh)["tests"]
+            tests = [t for t in tests if isinstance(t.get("number"), int) and isinstance(t.get("id"), str)]
+            if not tests:
+                raise ValueError("no tests listed")
+        except Exception as exc:  # unreadable: the maps hold the same list (ids and seconds of the pinned commit)
+            log(f"tests.json unreadable ({type(exc).__name__}: {exc}); using the list in the maps")
+            seconds = self.maps.load("tests")["seconds"]
+            tests = [{"number": i, "id": tid, "seconds": seconds[i]} for i, tid in enumerate(self.maps.ids)]
+        self.number_ms = {t["number"]: duration_ms(float(t.get("seconds") or 0.0)) for t in tests}
         by_id = {t["id"]: t for t in tests}
         self.number_of: list[int | None] = []   # maps numbering -> the run's numbering
         self.ms: list[int] = []
@@ -165,7 +173,11 @@ class Run:
 def main() -> int:
     run = Run()
     commits_dir = os.path.join(C.DATA_DIR, "commits")
-    names = sorted(n for n in os.listdir(commits_dir) if n.endswith(".patch"))
+    try:
+        names = sorted(n for n in os.listdir(commits_dir) if n.endswith(".patch"))
+    except OSError as exc:
+        log(f"no commits to answer: {exc}")
+        names = []
     analyses = [run.analyze(name[:-6], os.path.join(commits_dir, name)) for name in names]
     try:
         run.resolve_exact(analyses)

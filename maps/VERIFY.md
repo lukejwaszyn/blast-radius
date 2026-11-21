@@ -1,5 +1,12 @@
 # Verification of the maps
 
+> The tables below were recorded with the first version of `cov.json`. Since
+> then the tracers also record the first line of every function that is
+> entered (see `maps/README.md`): 5745 more lines carry coverage and no line
+> lost a test, so every candidate set below can only have grown. The selector
+> re-checks the same patches (`tools/dev_eval.py`); its results are in the
+> top-level README.
+
 Produced with `tools/verify_samples.py` (the kit's 30 sample patches and their answers), `tools/dev_check_mutations.py` and a few hand-made fixture edits, all labeled by running the full suite. The maps were built without any of these patches; this file only records how they fared.
 
 ## The 30 sample patches
