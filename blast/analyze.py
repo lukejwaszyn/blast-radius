@@ -26,9 +26,8 @@ import sys
 from . import config as C
 from .diffparse import ApplyError, FileChange, apply_hunks, parse_patch
 from .maps import Maps
-from .pydiff import Mark, bound_names, diff_python, first_line
+from .pydiff import Mark, bound_names, diff_python
 
-_SPLITLINE_EXTRAS = "\r\x0b\x0c\x1c\x1d\x1e\x85  "
 _PYTEST_INI_FILES = ("pytest.ini", ".pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml")
 _PYTEST_WORDS = re.compile(
     r"\[tool\.pytest|\[pytest\]|\[tool:pytest\]|\baddopts\b|\btestpaths\b|\bfilterwarnings\b|\bpython_files\b|"

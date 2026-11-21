@@ -53,6 +53,13 @@ beyond the kit's `requirements.lock` is used.
   evaluates to the same value; all 1620 tests pass on the rewritten copy, as
   they do in the lines pass (the aggregator refuses to build maps from a run
   with a failing or crashed test).
+- **Function entry counts as a line.** A LINE event of `sys.monitoring` fires
+  only when the line changes inside a code object, so a function whose whole
+  body is on its first line (one-line lambdas in the dialect tables, one-line
+  `def`s) is never reported when called. The tracers also listen to PY_START
+  and record the code object's first line. A check with made-up mutations of
+  one-line lambdas found failing tests that the first version of the maps did
+  not list; with entry lines recorded they are listed.
 - **Two runs per pass** (hash seeds 0 and 1) are united. The two lines-pass
   runs recorded identical line sets for every test.
 - **The official environment skips one test** (`test_variadic_iif_execution`,

@@ -89,14 +89,14 @@ ran = set()
 mon = sys.monitoring
 TOOL = 3
 getframe = sys._getframe
-def on_line(code, lineno):
+def note(code, lineno, frame):
     fid = fid_of(code.co_filename)
     if fid is None:
         return mon.DISABLE
     key = fid << 16 | lineno
     ran.add(key)
     if code.co_flags & 1:  # a function / lambda / comprehension body
-        f = getframe(1).f_back
+        f = frame.f_back
         site = 0
         while f is not None:
             c = f.f_code
@@ -112,9 +112,16 @@ def on_line(code, lineno):
         if s is None:
             s = deps[key] = set()
         s.add(site)
+def on_line(code, lineno):
+    return note(code, lineno, getframe(1))
+def on_start(code, offset):
+    # a LINE event fires only when the line changes: the entry of a one-line lambda or def
+    # counts as the execution of its first line
+    return note(code, code.co_firstlineno, getframe(1))
 mon.use_tool_id(TOOL, "blast-deps")
 mon.register_callback(TOOL, mon.events.LINE, on_line)
-mon.set_events(TOOL, mon.events.LINE)
+mon.register_callback(TOOL, mon.events.PY_START, on_start)
+mon.set_events(TOOL, mon.events.LINE | mon.events.PY_START)
 import sqlglot
 errors = {}
 for info in sorted(pkgutil.walk_packages(sqlglot.__path__, prefix="sqlglot."), key=lambda i: i.name):

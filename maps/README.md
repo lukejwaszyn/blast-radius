@@ -66,6 +66,15 @@ A line is reported only if bytecode starts on it. For an edit in the middle of
 a multi-line statement look up **all lines of the statement**
 (`static.json` → `spans`).
 
+The first line of a function or lambda is also recorded whenever it is
+**entered**. `sys.monitoring` reports a line only when the line changes inside
+a code object, so without this a call of a one-line lambda
+(`"WEEKOFYEAR": lambda args: exp.WeekOfYear(...)`, of which sqlglot's dialect
+tables hold about 1500) or of a one-line `def` would leave no trace. The line
+of a class-level dict entry that holds such a lambda therefore lists the tests
+that *called the lambda*; that the line also ran once at import is definition
+time and is not in this map.
+
 ### filecov.json — what importing a test file executes
 Same layout, but sets are sets of **test files** (`test_files`): the lines of
 `tests/**` that run when the test file is imported (its own module level, class

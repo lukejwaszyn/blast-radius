@@ -72,7 +72,11 @@ def read_run(raw: str, test_index: dict[str, int]):
         if number is None:
             continue  # a test the official environment skips
         if rec["failed"]:
-            raise SystemExit(f"{rec['test']} failed while tracing: {rec['failed'][0][2][-300:]}")
+            why = MEASURES_THE_TRACER.get(rec["test"])
+            if why is None or not all(why in f[2] for f in rec["failed"]):
+                raise SystemExit(f"{rec['test']} failed while tracing: {rec['failed'][0][2][-300:]}")
+            # the test ran to its last statement; only its measurement of the process differs
+            print(f"note: {rec['test']} fails under the tracer ({why}); its lines are complete", file=sys.stderr)
         tests[number] = rec
         ctx_of[rec["ctx"]] = number
     for rec in pending:
@@ -83,6 +87,16 @@ def read_run(raw: str, test_index: dict[str, int]):
     if crashes:
         raise SystemExit(f"crashed test processes: {crashes[:5]}")
     return files, tests, subs
+
+
+# Tests that measure the interpreter itself and so see the tracer: allowed to fail
+# while tracing, but only with the assertion named here (anything else still stops
+# the build).  test_generator_memory asserts that 1000 generator constructions
+# allocate under 1 KiB according to tracemalloc; the tracer's own bookkeeping for
+# function-entry events is allocated in the same process and counted with it.
+MEASURES_THE_TRACER = {
+    "tests/test_generator.py::TestGenerator::test_generator_memory": "self.assertLess(after - before, 1024)",
+}
 
 
 def line_kinds(static_file: dict) -> dict[int, str]:
@@ -343,6 +357,8 @@ def main() -> None:
         for entry in body_entries:  # not while importing: the import system reads and lists too
             what, rel = keep(entry)
             if what == "py":
+                if rec["failed"] and rel == rec["test"].split("::")[0]:
+                    continue  # pytest reading the test file to print the tolerated failure's traceback
                 py_read[rel] = py_read.get(rel, 0) | bit
             elif what == "dir":
                 listed[rel] = listed.get(rel, 0) | bit

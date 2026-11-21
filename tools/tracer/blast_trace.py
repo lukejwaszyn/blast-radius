@@ -7,9 +7,12 @@ switched on by ``sitecustomize.py`` when ``$BLAST_OUT`` is set.
 
 What it records, for files under ``$BLAST_ROOT`` (the sqlglot checkout):
 
-* executed lines, with ``sys.monitoring`` LINE events.  Each line location is
-  switched off after its first hit and all locations are switched on again
-  when the context changes, so the cost is one callback per line per context.
+* executed lines, with ``sys.monitoring`` LINE events, plus the first line of
+  every code object that is entered (PY_START): a LINE event only fires when
+  the line changes, so a one-line lambda or def would otherwise never be seen
+  being called.  Each location is switched off after its first hit and all
+  locations are switched on again when the context changes, so the cost is
+  one callback per line per context.
 * three buckets per context: ``imp`` while a module of ``sqlglot`` is being
   imported (module bodies, class bodies, and every function they call, e.g.
   metaclasses); ``top`` while a module of ``tests`` is being imported and no
@@ -84,6 +87,14 @@ def _on_line(code, lineno):
     else:
         body.add(fid << 16 | lineno)
     return _DISABLE
+
+
+def _on_start(code, _offset):
+    # sys.monitoring reports a LINE only when the line *changes* inside a code object, so
+    # a function whose whole body sits on its first line (`"X": lambda args: f(args)`,
+    # `def f(x): return x`) would never show up when it is called.  Its entry counts as
+    # the execution of its first line.
+    return _on_line(code, code.co_firstlineno)
 
 
 def _audit(event, args):
@@ -165,7 +176,8 @@ def start():
             _file_ids[rel] = i
     _mon.use_tool_id(TOOL, "blast")
     _mon.register_callback(TOOL, _mon.events.LINE, _on_line)
-    _mon.set_events(TOOL, _mon.events.LINE)
+    _mon.register_callback(TOOL, _mon.events.PY_START, _on_start)
+    _mon.set_events(TOOL, _mon.events.LINE | _mon.events.PY_START)
     sys.addaudithook(_audit)
     _patch_import()
 
