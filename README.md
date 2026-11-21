@@ -116,9 +116,11 @@ always prints one line per commit.
 ## What it costs on the sample set
 
 `make sample`: **165.2 simulated seconds, 0 misses** on the 30 sample commits
-(94.4 s is the cost with perfect knowledge). The static part takes about 0.3 s
-of CPU for the batch; each import comparison (4 of the 30 commits) about half
-a second more.
+(94.4 s is the cost with perfect knowledge). CPU for the batch, measured
+natively on a loaded arm64 laptop: 0.4 s for everything static plus 0.5 to
+0.9 s for each import comparison (4 of the 30 commits), 3.9 s in total; with
+`BLAST_SNAPSHOT=needed` (import only when the static answer is not confined
+to constants or is expensive) 2.2 s and the same selection on this set.
 
 | commits | selected / failing | note |
 | --- | --- | --- |
@@ -128,6 +130,31 @@ a second more.
 | 8y7j 0/0 | | the line is executed by no test |
 | 2qn5 6/0, 5y72 3/0, fryt 3/0, gbav 1/0, ktz3 3/0, 4d63 273/0 | | tests run the changed code and still pass |
 | 2haz 86/0, 66ks 51/0 | | `is` → `==`: 46 s of the gap, see below |
+
+## Checks beyond the sample set
+
+Patches made up for the purpose and labeled by running sqlglot's suite on the
+patched tree (`tools/dev_eval.py` prints selected vs failing for each):
+
+| set | patches | misses |
+| --- | ---: | ---: |
+| the kit's sample | 30 | 0 |
+| the maps' own checks: class-level flags, numbers, `arg_types`, dict entries; five fixture files | 19 | 0 |
+| single-line mutations where key-level reads, lambda bodies and derived values decide (one-line lambdas, table entries, time mappings, `arg_types` keys) | 37 | 0 |
+| random single-line mutations anywhere in `sqlglot/` | 14 | 0 |
+| other kinds: test bodies, shared test helpers, test class attributes, syntax errors, re-indented lines, broken and removed imports, a module that raises at import, an added method, an added class attribute | 12 | 0 |
+
+Most of the second to fourth sets were labeled on the tests that load the
+changed module rather than on the whole suite (a test that never loads the
+module cannot be affected); 21 were labeled on all 1620 tests.
+
+The first run of the third set did miss: three mutations of one-line lambdas
+failed tests the coverage map did not list, which is how the missing
+function-entry events in the tracer were found (fixed in the maps, see
+`tools/README.md`). On 66 further patches of kinds the sample does not have
+(new, deleted and renamed files, binary patches, broken TOML, CRLF, mode
+changes, garbage) the selector does not raise and gives the same answer in
+the image as natively.
 
 ## Honest limits
 
