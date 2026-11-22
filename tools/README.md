@@ -11,7 +11,7 @@ tools/build_maps.sh sqlglot venv/bin/python <kit>/sample/tests.json /tmp/blast-w
 ```
 
 Needs CPython 3.13 (`sys.monitoring`), `os.fork` (Linux or macOS), about
-250 MB of scratch space and about 12 minutes with 4 processes. No package
+270 MB of scratch space and about 20 minutes with 4 processes (the comparisons pass adds about 8). No package
 beyond the kit's `requirements.lock` is used.
 
 | Script | What it does |

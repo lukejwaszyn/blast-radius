@@ -7,7 +7,7 @@ left out and as little as possible is run.
 
 ```sh
 make sample    # build the image, run it on sample/ under the scorer's limits, score the output
-python3 -m unittest discover -s unit    # parser, packing, AST comparison, selection (no Docker needed)
+python3.13 -m unittest discover -s unit  # parser, packing, AST comparison, selection (no Docker needed; BLAST_SRC=<pinned sqlglot checkout> for the tests that read it)
 ```
 
 ## Method
@@ -195,22 +195,22 @@ always prints one line per commit.
 
 ## What it costs on the sample set
 
-`make sample`: **165.2 simulated seconds, 0 misses** on the 30 sample commits
-(94.4 s is the cost with perfect knowledge). CPU for the batch, measured
-natively on a loaded arm64 laptop: 0.4 s for everything static plus 0.5 to
-0.9 s for each import comparison (4 of the 30 commits), 4 to 5 s in total;
-with `BLAST_SNAPSHOT=needed` (import only when the static answer is not
-confined to constants or is expensive) about half of that and the same
-selection on this set.
+`make sample`: **112.5 simulated seconds, 0 misses** on the 30 sample commits
+(94.4 s is the cost with perfect knowledge; it was 165.2 s before
+`maps/cmp.json`). CPU for the batch, measured natively on a loaded arm64
+laptop: 0.8 s for everything static plus 0.5 to 0.9 s for each import
+comparison, 4 to 6 s in total; with `BLAST_SNAPSHOT=needed` (import only when
+the static answer is not confined to constants or is expensive) about half of
+that and the same selection on this set.
 
 | commits | selected / failing | note |
 | --- | --- | --- |
-| 8 fixture, 3 multi | 1/1 each (rszg 4/3) | |
+| 8 fixture, 3 multi | 1/1 each (986c 2/1, rszg 4/3) | |
 | 3 comment | 0/0 | |
 | ary6 10/10, 3utz 37/37, 6ze8 1/1, j6uz 2/2, 535z 3/1, bj7g 2/1, 2jrq 29/8 | | all failing tests inside |
 | 8y7j 0/0 | | the line is executed by no test |
-| 2qn5 6/0, 5y72 3/0, fryt 3/0, gbav 1/0, ktz3 3/0, 4d63 273/0 | | tests run the changed code and still pass |
-| 2haz 86/0, 66ks 51/0 | | `is` → `==`: 46 s of the gap, see below |
+| 2haz 0/0, 66ks 0/0, 2qn5 0/0 | | `is` → `==` (86 and 51 tests ran the line, `test_execute_tpcds` among them) and `<` → `<=`: no test ever saw the two operators disagree there |
+| 5y72 3/0, fryt 3/0, gbav 1/0, ktz3 3/0, 4d63 273/0 | | tests run the changed code, or read the changed value, and still pass |
 
 ## Checks beyond the sample set
 
@@ -261,7 +261,58 @@ rule from them is in this repository.
 | several files, harmless and harmful parts mixed | 9 | 0 | 0 | 158 s / 84 s |
 | **all** | **180** | **5** | **0** | **2200 s / 1376 s** |
 
-The five misses, each an assumption that did not hold, and what replaced it:
+**Round 2** added sixteen kinds (327 patches) and labeled 78 of them, plus 32
+more of the first set, again with the full suite: 290 labeled patches in all.
+
+| kind (round 2) | labeled | misses before | misses now | cost now / perfect knowledge |
+| --- | ---: | ---: | ---: | ---: |
+| scope: a line no test runs makes a name local, or the function a generator | 4 | 3 | 0 | 43 s / 32 s |
+| block structure: a line dedented out of or indented into a block, `elif` → `if`, swapped statements, `break` ↔ `continue`, `while` → `if`, another exception type | 4 | 0 | 0 | 14 s / 14 s |
+| signatures: parameters renamed or swapped, defaults flipped or dropped, decorators added or removed | 4 | 0 | 0 | 13 s / 7 s |
+| tables: entries swapped, duplicated keys, order of lists and tuples, enum members, an attribute deleted or added in a subclass | 4 | 0 | 0 | 7 s / 0 s |
+| inheritance: overrides added, methods deleted or renamed, classes renamed, bases swapped | 4 | 0 | 0 | 25 s / 4 s |
+| imports: names used only inside functions, rebinding, `TYPE_CHECKING`, package `__init__` tables, eager imports, cycles | 3 | 0 | 0 | 0 s / 0 s |
+| annotations and docstrings | 3 | 0 | 0 | 2 s / 0 s |
+| whitespace, CRLF, byte order marks, tabs (code and fixtures) | 3 | 0 | 0 | 2 s / 2 s |
+| fixtures: comment flavours the loader keeps, pair structure, less common files | 3 | 0 | 0 | 6 s / 6 s |
+| test files: redefined tests and classes, `expectedFailure`, skips, base classes | 3 | 0 | 0 | 6 s / 6 s |
+| writes to process-wide state, in test files and in code | 3 | 2 | 0 | 110 s / 17 s |
+| files: shadowing by package, extension module or stdlib name; sqlglotc; odd files | 3 | 2 | 0 | 54 s / 54 s |
+| pytest 9 configuration files, configuration in `tests/` | 3 | 0 | 0 | 110 s / 0 s |
+| several files | 3 | 0 | 0 | 7 s / 5 s |
+| more random one-line edits on narrowly covered code | 3 | 0 | 0 | 4 s / 4 s |
+| a comparison operator replaced by its neighbour (`is` → `==`, `<` → `<=` ...) | 28 | 0 | 0 | 137 s / 53 s (452 s before `maps/cmp.json`) |
+| **round 2** | **78** | **7** | **0** | **540 s / 204 s** |
+| first set, 212 labeled, with the round-2 selector | 212 | 0 | 0 | 2252 s / 1389 s |
+
+The seven misses of round 2 were four assumptions:
+
+1. *"A line no test runs changes nothing."* An assignment on such a line made
+   a module-level name a local of the whole function (three patches; the
+   callers got `UnboundLocalError` on lines the patch did not touch), a
+   `yield` made the function a generator. Step 3, `scope_shift`.
+2. *"The tests that run a statement are the tests it can affect."* A test
+   file whose module level sets `sqlglot.pretty = True` broke 223 tests of
+   other files; one test that set it and left it broke the 82 tests that ran
+   after it in the same process. Step "Writes to shared state".
+3. *"Only `.py` files and packages are importable."* A file `sqlglot/time.abi3.so`
+   is found before `sqlglot/time.py` (1600 tests failed). Step 7.
+4. (found without a failing patch) pytest 9 reads `pytest.toml` and
+   `.pytest.toml`; a configuration file in `tests/` changes pytest's rootdir,
+   and with it every test id, when pytest is started on `tests/`; a byte
+   order mark breaks a test that parses a source file as text.
+
+In the 28 operator patches the tests that failed were always among the tests
+`maps/cmp.json` lists for the comparison (for `tokenizer_core.py:747`,
+`<=` → `<`: 34 listed, the same 34 failed), and never one it rules out.
+
+Labels of patches that add a test file come from a run that names the test
+files explicitly (so that ids stay comparable) and therefore does not collect
+the new file; a plain `pytest tests` does, and then the module-level write of
+such a file fails other tests (checked by hand). The selector assumes the
+plain run.
+
+The five misses of the first round, each an assumption that did not hold, and what replaced it:
 
 1. *"The import of the patched tree always answers."* A new
    `sqlglot/_version.py` that raises makes `import sqlglot` fail (the pinned
@@ -285,12 +336,28 @@ pinned source.
 ## Honest limits
 
 - **Coverage says a test ran the code, not that the edit changes its
-  result.** An edit that leaves behaviour unchanged (`x is None` → `x == None`)
-  or that no assertion notices still selects every test that executed the
-  line. When one of them is `test_execute_tpcds` (21.5 s) that is expensive:
-  two sample commits account for 46 of the 71 seconds above the optimum. The
-  static method cannot tell these apart; running the cheap candidates at
-  decision time could, at the price of CPU seconds.
+  result.** An edit that no assertion notices still selects every test that
+  executed the line, which is expensive when `test_execute_tpcds` (21.5 s) or
+  `test_max_nodes` (28.8 s) is among them. The one family measured ahead is a
+  comparison operator replaced by its neighbour (`maps/cmp.json`); a changed
+  constant, a negated condition, `and` → `or`, a changed argument are not.
+- **`maps/cmp.json` is a record of each test running alone**, on macOS/arm64,
+  with two hash seeds. A test that evaluates the comparison with other
+  operands in a shared process, on another platform or under another set
+  order than the recording would be ruled out wrongly. `x is y` between equal
+  strings or numbers depends on interning; the recording saw what CPython 3.13
+  does. Tests that reach the line only through left-over state are not
+  pruned.
+- **Writes to shared state are recognised by their syntax** (`blast/state.py`):
+  a write through a local alias (`p = SnowflakeParser; p.FUNCTIONS[...] = ...`),
+  through a called helper, or by a mutating method not in the list is not
+  seen. In sqlglot's own code an edit that changes *what* an existing write
+  stores is left to line coverage.
+- **A test file that no longer imports** selects its own tests and the tests
+  that import it. A plain `pytest` stops at the first collection error and
+  runs nothing; the rules say such a file's tests fail, not all tests, and
+  the selector follows the rules. A new, unnumbered test file with a syntax
+  error selects nothing for the same reason.
 - **Tables that are consumed whole.** `Generator.TRANSFORMS` is copied into a
   dispatch table and `Tokenizer.KEYWORDS` goes into the tokenizer core, so a
   changed entry (other than the body of a lambda, which coverage answers)
@@ -332,10 +399,10 @@ pinned source.
 | Path | What |
 | --- | --- |
 | `selector.py` | entry point (`CMD` of the image) |
-| `blast/` | `diffparse` (diff reader), `pydiff` (AST comparison), `analyze` (patch → candidate groups), `exact` + `snapshot_child` (import comparison), `choose`, `pack`, `maps` (map access), `config` (all constants) |
-| `maps/` | the maps of the pinned commit, plain JSON, 7.5 MB (`maps/README.md`, `maps/VERIFY.md`) |
+| `blast/` | `diffparse` (diff reader), `pydiff` (AST comparison, scope shifts, operator swaps), `state` (writes to shared state), `analyze` (patch → candidate groups), `exact` + `snapshot_child` (import comparison), `choose`, `pack`, `maps` (map access), `config` (all constants) |
+| `maps/` | the maps of the pinned commit, plain JSON, 7.6 MB (`maps/README.md`, `maps/VERIFY.md`) |
 | `tools/` | map builders, the fingerprinting used by the import comparison, image build steps (`fetch_sqlglot.py`, `check_image.py`), `dev_eval.py` (measure the selector on labeled patches) |
-| `unit/` | unit tests (`test_generalization.py`: one regression test per unsound assumption found with made-up patches) |
+| `unit/` | unit tests (`test_generalization.py`, `test_round2.py`: one regression test per unsound assumption found with made-up patches; `test_swap.py`: operator swaps and `maps/cmp.json`) |
 | `Dockerfile` | pinned base image; downloads sqlglot at the pinned commit from GitHub, compiles, fingerprints, self-checks |
 | `Makefile`, `score.py`, `SCORING.md`, `sample/` | the organizers' kit, for local checks (the Makefile only gained quotes around paths) |
 
