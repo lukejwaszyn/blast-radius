@@ -187,6 +187,67 @@ modules it loaded and the files it opened.
    `max(longest test, total / k) + 2 s × k`; longest-first packing, refined
    by a capacity search, reaches that bound on this suite.
 
+10. **Run the candidates when that costs less than it saves**
+   (`blast/verify.py`, `blast/runner.py`; `BLAST_VERIFY=off` turns it off).
+   The steps above say which tests *could* fail. A commit whose candidates all
+   pass needs no worker at all, and five of the twelve sample `code` commits
+   with a non-empty selection are of that kind. Before answering, the
+   selector therefore runs a commit's candidates on the patched code when
+
+       P(no candidate fails) × cost of the selection − CPU of the run > 0.25 s
+
+   (CPU is charged second for second, so only small sets of quick tests
+   qualify) and drops the ones that ran to their end and passed, provided
+   that closes a worker. How it runs them:
+   - one long-lived process imports the standard library modules the tests
+     need (and numpy, pandas, duckdb when a test file needs them) and forks a
+     child per commit;
+   - the patched files are written into a real copy of the checkout in `/tmp`
+     and the pinned ones put back afterwards, time stamps included, so the
+     compiled files of the pinned commit keep serving every untouched module;
+   - the child imports sqlglot and the test files *fresh* from that tree and
+     runs the candidates in pytest's order with `unittest` itself (sqlglot's
+     tests are plain `unittest.TestCase`s; no pytest is installed), stopping a
+     test at its first failed subtest and the whole run at the first test over
+     its time limit.
+
+   Only a "pass" from a run that finished with no error outside a test
+   (`setUpClass`, `tearDownClass`, class clean-ups) lets a test go. A commit
+   keeps its static selection untouched when a test's result in a process of
+   its own would not settle what the labeling run saw:
+   - the patch is not one the runner reproduces byte for byte (binary parts,
+     mode changes, a hunk that needs fuzz), or it touches anything but Python
+     files of `sqlglot/` and existing ones of `tests/` and fixtures:
+     `conftest.py`, configuration, new test files, a deleted package marker
+     and extension modules change what pytest itself does;
+   - the selection is there because of state shared between tests: a write to
+     shared state (`blast/state.py`), a line of `maps/warm.json`, or anything
+     in or read by the functions around those lines (the dialect registry,
+     which one test file empties, and `Expression.__deepcopy__`);
+   - a candidate is a test the runner does not judge (`maps/runner.json`,
+     built by running every test of the pinned commit alone through the same
+     runner): the 24 that start other processes (a `spawn` process pool makes
+     every worker re-import sqlglot, pandas and duckdb, about 2 s of CPU each),
+     the 3 long ones, and any that would not pass alone (there is none).
+
+11. **The two TPC fixtures are triples, and some tests use only a part**
+   (`blast/analyze.py::pair_fixture`). `tpc-h.sql` and `tpc-ds.sql` hold
+   `(options, sql, expected)` triples. `TestExecutor.setUpClass` loads both for
+   all 59 executor tests; `test_execute_tpch` / `test_execute_tpcds` then use
+   the options and the sql of their own file and never the expected output
+   (`for args, sql, _ in sqls`), while the optimizer's `test_tpch` /
+   `test_tpcds` and `test_optimized_tpch` use everything. The selector runs
+   the loader's own logic (`tests/helpers.py::load_sql_fixture_pairs`, twelve
+   lines, ported; the image build checks the pinned source lines the rule was
+   read from) on the old and the new text:
+   - the loader raises (a `#` line without a colon): the class set-up fails,
+     every test that loads the file is selected;
+   - the triples are the same (blanks after a `;`): nothing is selected;
+   - only expected outputs differ: the executor's test of that file is left
+     out, and so is the other file's (`maps/opens.json` lists both under both
+     files because one source line names both lists). An edit to an expected
+     output of `tpc-ds.sql` then costs 4.2 s (`test_tpcds`) instead of 25.5 s.
+
 Every probability, threshold and limit is a named constant in
 `blast/config.py`. Anything the analysis cannot read (a hunk that does not
 fit the pinned file, an exception in the analysis itself) falls back to the
@@ -195,13 +256,14 @@ always prints one line per commit.
 
 ## What it costs on the sample set
 
-`make sample`: **112.5 simulated seconds, 0 misses** on the 30 sample commits
-(94.4 s is the cost with perfect knowledge; it was 165.2 s before
-`maps/cmp.json`). CPU for the batch, measured natively on a loaded arm64
-laptop: 0.8 s for everything static plus 0.5 to 0.9 s for each import
-comparison, 4 to 6 s in total; with `BLAST_SNAPSHOT=needed` (import only when
-the static answer is not confined to constants or is expensive) about half of
-that and the same selection on this set.
+`make sample`: **106.2 simulated seconds, 0 misses** on the 30 sample commits
+(94.4 s is the cost with perfect knowledge; the static selection alone,
+`BLAST_VERIFY=off`, gives 112.5 s, and it was 165.2 s before `maps/cmp.json`).
+CPU for the batch, measured natively on a loaded arm64 laptop: 0.8 s for
+everything static plus 0.5 to 0.9 s for each import comparison, 4 to 6 s in
+total (with `BLAST_SNAPSHOT=needed`, import only when the static answer is not
+confined to constants or is expensive, about half of that and the same
+selection on this set), plus 1.3 s for running candidates (next section).
 
 | commits | selected / failing | note |
 | --- | --- | --- |
@@ -210,7 +272,85 @@ that and the same selection on this set.
 | ary6 10/10, 3utz 37/37, 6ze8 1/1, j6uz 2/2, 535z 3/1, bj7g 2/1, 2jrq 29/8 | | all failing tests inside |
 | 8y7j 0/0 | | the line is executed by no test |
 | 2haz 0/0, 66ks 0/0, 2qn5 0/0 | | `is` → `==` (86 and 51 tests ran the line, `test_execute_tpcds` among them) and `<` → `<=`: no test ever saw the two operators disagree there |
-| 5y72 3/0, fryt 3/0, gbav 1/0, ktz3 3/0, 4d63 273/0 | | tests run the changed code, or read the changed value, and still pass |
+| fryt 0/0, gbav 0/0, ktz3 0/0 | | 3, 1 and 3 tests run the changed code; run on the patched tree at decision time, all pass and are dropped |
+| 5y72 3/0, 4d63 273/0 | | tests run the changed code, or read the changed value, and still pass; not run at decision time (process-pool tests among them; 10 s of tests) |
+
+## Running candidates at decision time: what it buys and why it is trusted
+
+**Cost and benefit**, static selection against static selection plus runs
+(step 10), same commits, zero misses on both sides everywhere:
+
+| set | commits | static | with runs | saved | CPU of the runs | commits run / emptied |
+| --- | --- | --- | --- | --- | --- | --- |
+| sample (the image, scorer's flags) | 30 | 112.461 s | 106.222 s | 6.239 s | 1.3 s | 5 / 3 |
+| labeled, round-1 kinds | 212 | 2251.7 s | 2225.3 s | 26.4 s | 12.3 s | 35 / 13 |
+| labeled, round-2 kinds | 78 | 540.4 s | 535.7 s | 4.7 s | 3.9 to 5.5 s | 16 / 2 |
+
+- The CPU column is everything the step adds (planning, the zygote, the copy
+  of the checkout, the test processes), measured inside the same run with
+  `os.times()`. For the sample: 1.25 to 1.36 s natively on macOS/arm64, 1.2 to
+  1.7 s in a linux/arm64 container with the pinned Python, 2.1 to 2.7 s under
+  amd64 emulation (where everything is about three times slower). On the
+  sample that is about **5 s net of 117 s** (simulated + CPU).
+- The labeled sets were built to break things (mutations chosen to hit tables,
+  scopes, signatures; hangs): there only 2 of 16 and about 4 in 10 runs find
+  nothing failing, against 3 of 5 on the organizers' sample, so the step
+  roughly pays for itself on round 2 and gains about 14 s on round 1. Seven
+  hang patches cost 0.2 to 1.0 s each (the time limit of one test).
+- A fixed 0.45 s per batch (0.25 s in Linux): starting the zygote, importing
+  90 standard library modules once, copying `sqlglot/` and `tests/` to `/tmp`.
+  A job costs 0.095 s plus its tests (fork, fresh import of sqlglot and one
+  test file); tests cost about what `tests.json` records (0.85 to 1.0 ×).
+
+**Fidelity.** A test's verdict under this runner has to be the labeling run's.
+Checked three ways:
+
+1. *The pinned commit.* All 1617 tests up to 5 s pass alone and in per-file
+   jobs, natively and in the pinned image on linux/arm64; the 1593 the runner
+   may judge pass inside the submission image under the scorer's flags (user
+   `nobody`, read-only disk, 64 MB `/tmp`, no network).
+2. *Every labeled patch, far beyond what the policy would run*
+   (`lab/runfid.py fidelity`): for each of the 320 patches labeled by a full
+   pytest run, the static selection plus up to 150 of its truly failing tests
+   went through the runner. 19,083 verdicts on 187 patches; 9,789 truly
+   failing tests reported failing. Six patches had tests reported passing
+   that truly fail, each for a reason a test's own run cannot show:
+   - a new `tests/conftest.py` (an autouse fixture that raises; a syntax
+     error) and a deleted `tests/__init__.py`: pytest's doing, not the test's;
+   - two patches that write shared state (`sqlglot.pretty = True` in a test
+     file; a test that leaves it set): the failing tests are *other* tests;
+   - `"Druid"` removed from `sqlglot.dialects.DIALECTS`: one test fails only
+     after another test file has emptied the dialect registry.
+
+   All six are classes the policy leaves to the static selection (paths;
+   `Analysis.shared`; the functions around the lines of `maps/warm.json`).
+   The last one was not excluded when it was found: it led to the rule that a
+   changed value read anywhere in such a function counts as shared state.
+   Apart from those classes: no test reported passing that truly fails, and 38
+   reported failing or without verdict that truly pass (hangs, removed tests),
+   which costs nothing.
+3. *End to end*, the selector with the step on: zero misses on the sample
+   (three runs in the image) and on both labeled sets.
+
+**What was measured and left out**
+
+- *Process-pool tests with forked workers* (`BLAST_VERIFY_SPAWN=fork`). 22
+  optimizer tests hand work to a `spawn` pool; alone each costs about 2 s of
+  CPU in workers that re-import everything. With forked workers they cost
+  their recorded time, but the workers then start from the test process's
+  state instead of a fresh interpreter, and on the sample the one commit this
+  would empty (5y72, 2.5 s) is paid for by three others whose pool tests fail
+  (0.5 to 0.8 s each) and by importing pandas and duckdb once (0.55 s). Net
+  about zero for an unverified change of start method: off.
+- *Importing every test file first*, as pytest's collection does: 0.26 s per
+  job instead of 0.095 s, plus pandas and duckdb for every batch. It would not
+  have fixed the one state-dependent case found (the registry is emptied by a
+  test, not by an import), so the CPU buys nothing that was measured.
+- *Dropping passing tests when the worker stays open* saves milliseconds and
+  carries the same small risk as an emptied commit: not done
+  (`VERIFY_MIN_DROP_SAVING_S`).
+- *Larger candidate sets* (4d63: 273 tests, 10 s, static cost 9.1 s): the run
+  costs about what it could save.
 
 ## Checks beyond the sample set
 

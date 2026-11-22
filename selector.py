@@ -84,7 +84,9 @@ class Run:
         try:
             with open(path, "rb") as fh:
                 data = fh.read()
-            return self.analyzer.analyze(commit, data)
+            an = self.analyzer.analyze(commit, data)
+            an.data = data
+            return an
         except Exception as exc:
             an = Analysis(commit)
             an.notes.append(f"analysis failed: {type(exc).__name__}: {exc}")
@@ -137,7 +139,10 @@ class Run:
             an = job.analysis
             if job.result is not None:
                 try:
+                    warm_before = self.maps.warm_hits
                     found = exact.groups_from(job, self.maps, Group, self.analyzer)
+                    if self.maps.warm_hits != warm_before:
+                        an.shared.append("a changed value that some tests read only after other tests ran (maps/warm.json)")
                 except Exception as exc:  # never let one odd answer cost a commit its candidates
                     an.groups.extend(an.exact.fallback)
                     self.import_failed(an, f"the import comparison could not be read ({type(exc).__name__}: {exc})")
@@ -164,8 +169,54 @@ class Run:
                 mask |= self.maps.file_line_tests(rel)
             an.add(C.P_MODULE_BROKEN, mask, f"{why}: every test that loads {module}")
 
+    def verify(self, analyses: list[Analysis]) -> None:
+        """Run the candidates of the commits where that is expected to pay (blast/verify.py)."""
+        if C.VERIFY != "on" or self.unmapped or self.valid != self.maps.all_mask:
+            return
+        from blast.verify import Verifier
+
+        verifier = Verifier(self.maps, self.ms, self.valid, self.analyzer.src.read, log)
+        if not verifier.ok:
+            return
+        verifier.budget += C.VERIFY_CPU_BUDGET_PER_COMMIT_S * len(analyses)
+        before = os.times()
+        cost_before = {}
+        try:
+            plans = []
+            for an in analyses:
+                if getattr(an, "selected", None):
+                    plan = verifier.plan(an, an.selected[0], an.groups)
+                    plans.append(plan)
+            todo = verifier.schedule(plans)
+            for plan in plans:
+                if plan.why:
+                    plan.an.notes.append(f"verify: not run: {plan.why}")
+            for plan in todo:
+                an = plan.an
+                cost_before[an.commit] = self.cost_of_mask(an.selected[0])
+                try:
+                    an.selected = (verifier.run(plan, self.elapsed()), an.selected[1])
+                except Exception as exc:
+                    an.notes.append(f"verify: failed ({type(exc).__name__}: {exc}): static selection kept")
+        finally:
+            verifier.close()   # reaps the runner, so its CPU and its children's is in os.times() from here on
+            after = os.times()
+            cpu = sum(getattr(after, k) - getattr(before, k) for k in ("user", "system", "children_user", "children_system"))
+            saved = sum(cost_before[an.commit] - self.cost_of_mask(an.selected[0]) for an in analyses if an.commit in cost_before)
+            log(f"verify: {len(cost_before)} of {len(analyses)} commits run, {saved / 1000:.3f} s of simulated cost saved "
+                f"for {cpu:.2f} s CPU (of which {verifier.spent:.2f} s in the test processes)")
+
+    def cost_of_mask(self, mask: int) -> int:
+        from blast.pack import best_possible
+
+        indices = bits(mask)
+        return best_possible(sum(self.ms[i] for i in indices), max((self.ms[i] for i in indices), default=0), len(indices))
+
+    def select(self, an: Analysis) -> None:
+        an.selected = choose(an.groups, self.ms, self.valid)
+
     def answer(self, an: Analysis) -> list[list[int]]:
-        mask, left_out = choose(an.groups, self.ms, self.valid)
+        mask, left_out = an.selected if getattr(an, "selected", None) is not None else choose(an.groups, self.ms, self.valid)
         numbers = {self.number_of[i]: self.ms[i] for i in bits(mask)}
         if self.unmapped and any(g.p >= C.ALWAYS_KEEP for g in an.groups):
             for number in self.unmapped:
@@ -203,6 +254,16 @@ def main() -> int:
                     run.import_failed(an, "the import comparison did not run")
                 except Exception:
                     an.add(C.P_INTERNAL_ERROR, run.maps.all_mask, "the import comparison did not run: run everything")
+    for an in analyses:
+        try:
+            run.select(an)
+        except Exception as exc:
+            an.selected = None
+            log(f"{an.commit}: selection failed ({type(exc).__name__}: {exc})")
+    try:
+        run.verify(analyses)
+    except Exception as exc:  # the static selection stands
+        log(f"verify phase failed: {type(exc).__name__}: {exc}")
     out = []
     for an in analyses:
         try:

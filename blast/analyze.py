@@ -89,6 +89,9 @@ class Analysis:
         self.groups: list[Group] = []
         self.notes: list[str] = []
         self.exact: ExactRequest | None = None
+        # Reasons why a candidate's result in a process of its own would not settle whether it
+        # fails in the labeling run (state shared between tests): blast/verify.py leaves such commits alone.
+        self.shared: list[str] = []
 
     def add(self, p: float, mask: int, why: str):
         if mask:
@@ -172,12 +175,16 @@ class Analyzer:
             return an
         for problem in patch.problems:
             an.notes.append(problem)
+        warm_before = self.maps.warm_hits
         for fc in patch.files:
             try:
                 self.file(an, fc)
             except Exception as exc:  # one odd file must not take the commit down: run what could depend on it
                 an.notes.append(f"{fc.path}: analysis failed ({type(exc).__name__}: {exc})")
                 self.broad(an, fc.path or "", C.P_INTERNAL_ERROR, "analysis of this file failed")
+                an.shared.append("the analysis of a file failed")
+        if self.maps.warm_hits != warm_before:
+            an.shared.append("code that some tests reach only after other tests ran (maps/warm.json)")
         return an
 
     def broad(self, an: Analysis, path: str, p: float, why: str):
@@ -359,9 +366,59 @@ class Analyzer:
             readable = False  # the loaders open fixtures as UTF-8
         if consumers is None or not readable:
             an.add(C.P_FIXTURE_CONSUMER, openers, f"{path}: tests that open the fixture")
+        elif path in PAIR_FIXTURES:
+            self.pair_fixture(an, path, old_text, new_text, openers, consumers)
         else:
             an.add(C.P_FIXTURE_CONSUMER, consumers, f"{path}: tests that consume the fixture")
             an.add(C.P_FIXTURE_OPENER, openers & ~consumers, f"{path}: tests that open the fixture in a shared set-up")
+
+    def pair_fixture(self, an: Analysis, path: str, old_text: str, new_text: str, openers: int, consumers: int):
+        """tpc-h.sql / tpc-ds.sql: (meta, sql, expected) triples, of which some tests use only a part.
+
+        The file is loaded for the whole TestExecutor class in setUpClass, so if the loader itself
+        raises on the new text every test of the class errors.  Otherwise a test is touched only if
+        a part it uses differs: the executor's test_execute_tpch / test_execute_tpcds run each `sql`
+        through the Python executor and through DuckDB and never look at `expected`."""
+        maps = self.maps
+        index = {tid: i for i, tid in enumerate(maps.ids)}
+        try:
+            old_pairs = load_pairs(old_text)
+        except (ValueError, IndexError):
+            old_pairs = None
+        try:
+            new_pairs = load_pairs(new_text)
+        except (ValueError, IndexError) as exc:
+            an.add(C.P_FIXTURE_GONE, openers, f"{path}: tests/helpers.py::load_sql_fixture_pairs raises on the new text "
+                                              f"({type(exc).__name__}): every test whose set-up loads it")
+            return
+        partial = {}     # test -> the fields it uses
+        for tid, fields in PAIR_FIXTURES[path]["uses"].items():
+            if tid in index:
+                partial[index[tid]] = fields
+        strangers = 0    # tests the map lists as consumers because a shared line mentions this file too
+        for tid in PAIR_FIXTURES[path]["not_used_by"]:
+            if tid in index:
+                strangers |= 1 << index[tid]
+        if old_pairs is None or len(partial) != len(PAIR_FIXTURES[path]["uses"]):
+            an.add(C.P_FIXTURE_CONSUMER, consumers, f"{path}: tests that consume the fixture")
+            an.add(C.P_FIXTURE_OPENER, openers & ~consumers, f"{path}: tests that open the fixture in a shared set-up")
+            return
+        if old_pairs == new_pairs:
+            an.add(C.P_FIXTURE_IGNORED_LINES, openers,
+                   f"{path}: the (meta, sql, expected) triples that load_sql_fixture_pairs yields are unchanged")
+            return
+        touched = consumers & ~strangers
+        untouched = strangers
+        for i, fields in partial.items():
+            if [tuple(p[f] for f in fields) for p in old_pairs] == [tuple(p[f] for f in fields) for p in new_pairs]:
+                touched &= ~(1 << i)
+                untouched |= 1 << i
+        an.add(C.P_FIXTURE_CONSUMER, touched, f"{path}: tests that use a part of the fixture that changed")
+        an.add(C.P_FIXTURE_IGNORED_LINES, untouched & openers,
+               f"{path}: tests that use only parts of the fixture that did not change (the sql and its `#` options, not the expected output; "
+               "or the other TPC file)")
+        an.add(C.P_FIXTURE_IGNORED_LINES, openers & ~touched & ~untouched,
+               f"{path}: tests whose class set-up loads the fixture and uses nothing of it (the loader accepts the new text)")
 
     def pytest_config(self, an: Analysis, path: str, old_text: str | None, new_text: str | None):
         """pyproject.toml, setup.cfg, pytest.ini, tox.ini: pytest parses them at start-up for every test."""
@@ -520,6 +577,7 @@ class Analyzer:
             except (SyntaxError, ValueError, RecursionError):
                 leaks = []
             if leaks:
+                an.shared.append("a write to state shared by the whole process")
                 an.add(C.P_STATE_LEAK, maps.all_mask,
                        f"{path}: new test file writes state shared by the whole process "
                        f"({', '.join(sorted({scope or '<module>' for scope, _w, _d in leaks})[:3])})")
@@ -586,6 +644,7 @@ class Analyzer:
             # A write through a target the function did not write before is new shared state.
             leaks = new_write_targets(diff.old_tree, diff.new_tree)
             if leaks and (maps.module_tests(maps.module_of(path) or "") or maps.file_line_tests(path)):
+                an.shared.append("a write to state shared by the whole process")
                 an.add(C.P_STATE_LEAK, maps.all_mask,
                        f"{path}: {', '.join(leaks[:3])} now writes state shared by the whole process: tests that run later can see it")
         elif cat == "test" or maps.covered(path):
@@ -597,6 +656,7 @@ class Analyzer:
             # share the process: a changed write to an imported module or class reaches them all.
             leaks = changed_writers(diff.old_tree, diff.new_tree)
             if leaks and (self.test_dependents(path) or maps.file_line_tests(path)):
+                an.shared.append("a write to state shared by the whole process")
                 an.add(C.P_STATE_LEAK, maps.all_mask,
                        f"{path}: a statement writing state shared by the whole process was added, removed or changed "
                        f"({', '.join(leaks[:3])}): tests that run later can see it")
@@ -646,6 +706,16 @@ class Analyzer:
         for text, tests in cache:
             if attr in text and pattern.search(text):
                 mask |= tests
+        # The functions around those lines read more than the lines themselves do; a value they
+        # use changes what happens once other tests have run, on lines every test runs anyway.
+        scopes = self.__dict__.setdefault("_warm_scope_text", None)
+        if scopes is None:
+            scopes = self.__dict__["_warm_scope_text"] = []
+            for rel, first, last in self.maps.warm_scopes():
+                text = self.src.read(rel)
+                scopes.append("\n".join(text.split("\n")[first - 1:last]) if text else "")
+        if mask or any(attr in text and pattern.search(text) for text in scopes):
+            self.maps.warm_hits += 1
         return mask
 
     # --------------------------------------------- who uses a module-level name
@@ -874,6 +944,61 @@ def declared_encoding(text: str) -> str:
 def _filter_comments(s: str) -> str:
     """tests/helpers.py::_filter_comments at the pinned commit."""
     return "\n".join([line for line in s.splitlines() if line and not line.startswith("--")])
+
+
+def load_pairs(text: str) -> list[tuple[dict, str, str]]:
+    """tests/helpers.py::load_sql_fixture_pairs (with _extract_meta) of the pinned commit, on a text.
+    Raises what the loader raises: ValueError for a `#` line without a colon, IndexError for a
+    statement made of `#` lines only."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")     # the file is opened in text mode
+    statements = _filter_comments(text).split(";")
+    out = []
+    for i in range(0, len(statements), 2):
+        if i + 1 < len(statements):
+            lines = statements[i].strip().split("\n")
+            meta = {}
+            k = 0
+            while lines[k].startswith("#"):
+                key, val = lines[k].split(":", maxsplit=1)
+                meta[key.lstrip("#").strip()] = val.strip()
+                k += 1
+            out.append((meta, "\n".join(lines[k:]), statements[i + 1].strip()))
+    return out
+
+
+# Fixtures of (meta, sql, expected) triples that some tests use only in part.  From the pinned
+# tests/test_executor.py (tools/check_image.py checks that these lines are there):
+#   118-119  setUpClass loads both files for every test of TestExecutor;
+#   175-191  test_execute_tpch / test_execute_tpcds: `for args, sql, _ in sqls` -- meta and sql of
+#            their own file, never the expected output, never the other file;
+#   167      `_, sql, _ = self.tpch_sqls[i] if tpch else self.tpcds_sqls[i]` -- one line naming both
+#            lists, which is why maps/opens.json lists each of the two tests under both files.
+# Fields: 0 = meta, 1 = sql, 2 = expected.
+PAIR_FIXTURES = {
+    "tests/fixtures/optimizer/tpc-h/tpc-h.sql": {
+        "uses": {"tests/test_executor.py::TestExecutor::test_execute_tpch": (0, 1)},
+        "not_used_by": ("tests/test_executor.py::TestExecutor::test_execute_tpcds",),
+    },
+    "tests/fixtures/optimizer/tpc-ds/tpc-ds.sql": {
+        "uses": {"tests/test_executor.py::TestExecutor::test_execute_tpcds": (0, 1)},
+        "not_used_by": ("tests/test_executor.py::TestExecutor::test_execute_tpch",),
+    },
+}
+PAIR_FIXTURE_SOURCE = {
+    "tests/test_executor.py": (
+        '        cls.tpch_sqls = list(load_sql_fixture_pairs("optimizer/tpc-h/tpc-h.sql"))',
+        '        cls.tpcds_sqls = list(load_sql_fixture_pairs("optimizer/tpc-ds/tpc-ds.sql"))',
+        "            _, sql, _ = self.tpch_sqls[i] if tpch else self.tpcds_sqls[i]",
+        "            futures = [pool.submit(mp_execute, parse_one(sql), args) for args, sql, _ in sqls]",
+        "        self._mp_execute(TPCH_SCHEMA, self.tpch_tables, self.tpch_sqls, True)",
+        "        self._mp_execute(TPCDS_SCHEMA, self.tpcds_tables, self.tpcds_sqls, False)",
+    ),
+    "tests/helpers.py": (
+        '        statements = _filter_comments(f.read()).split(";")',
+        '    while sql_lines[i].startswith("#"):',
+        '        key, val = sql_lines[i].split(":", maxsplit=1)',
+    ),
+}
 
 
 def _ini_problem(text: str, base: str) -> tuple[str | None, bool]:

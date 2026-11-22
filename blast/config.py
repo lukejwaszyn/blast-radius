@@ -127,6 +127,55 @@ SNAPSHOT_MIN_SAVING_MS = 1_500
 SNAPSHOT_TIMEOUT_S = float(os.environ.get("BLAST_SNAPSHOT_TIMEOUT", "8"))
 SNAPSHOT_PARALLEL = 2
 
+# ------------------------------------------ running candidates at decision time
+# "on": run a commit's candidates on the patched tree when that is expected to cost less CPU
+#       than it saves (blast/verify.py), and drop the ones that pass.
+# "off": static selection only.
+VERIFY = os.environ.get("BLAST_VERIFY", "on")
+# Expected CPU of a run.  The fixed parts were measured on the machine maps/runner.json was built
+# on (an Apple M-series core, linux/arm64 container): 0.095 s per job (fork, fresh import of
+# sqlglot and one test file; "job_overhead_s" in the map), class set-up per class in the map.
+# The scoring machine is assumed this many times slower for them.  (It is probably not: the
+# recorded durations of tests.json, taken under pytest, are 1.15 x this runner's CPU for the
+# same tests on that core.)
+VERIFY_MACHINE_FACTOR = 1.5
+VERIFY_FILE_IMPORT_S = 0.03       # each further test file of the job, same machine
+# Runner CPU per recorded second of a test (measured 0.5-0.9 on that core; recorded seconds are
+# the organizers' and are taken at face value).
+VERIFY_SPEED = 1.0
+# numpy + pandas + duckdb, imported once per batch by the zygote when a test file needs them
+# (0.55 s in the container on that core).
+VERIFY_HEAVY_IMPORT_S = 0.55
+# Starting the zygote and copying the checkout to /tmp, once per batch (0.2 s on that core).
+VERIFY_START_S = 0.2
+# A run must be expected to save this much more than it costs.
+VERIFY_MARGIN_S = 0.25
+# When some candidate fails, the passing ones are still dropped; that saving is uncertain.
+VERIFY_PARTIAL_WEIGHT = 0.5
+# Dropping a test that passed alone is a small bet that it also passes in the labeling run (a
+# miss costs 300 s).  It is taken only when it saves at least this much, which in practice means
+# a worker less (2 s); shaving milliseconds off a worker that stays open is not worth it.
+VERIFY_MIN_DROP_SAVING_S = 1.0
+# Never run more than this many recorded seconds of tests for one commit.
+VERIFY_MAX_RUN_S = 8.0
+# A test is given  factor x recorded seconds + VERIFY_TEST_LIMIT_S  before the run is abandoned
+# (an abandoned run keeps the static selection; a patch that hangs a test costs about this much CPU).
+# Alone, a test costs at most 0.23 s more than its recorded duration on the map's machine (cold
+# caches, dialects imported on first use).
+VERIFY_TEST_LIMIT_FACTOR = 3.0
+VERIFY_TEST_LIMIT_S = 1.0
+# Anything outside a test: importing the patched tree and the test files before the first test,
+# class set-up and tear-down between tests (TestExecutor's takes 1.4 s on the map's machine).
+VERIFY_START_LIMIT_S = 4.0
+# All runs of a batch together: this much, plus VERIFY_CPU_BUDGET_PER_COMMIT_S for every commit of
+# the batch.  A normal batch of 30 uses 1 to 3 s; the cap is for a batch full of patches that
+# make tests hang (each costs up to its time limits) -- past it the static selection is used.
+VERIFY_CPU_BUDGET_S = float(os.environ.get("BLAST_VERIFY_CPU_BUDGET", "5"))
+VERIFY_CPU_BUDGET_PER_COMMIT_S = 0.3
+# Tests that hand work to a `spawn` process pool: "skip" leaves their commits to the static
+# selection; "fork" runs them with forked workers (not the labeling run's start method).
+VERIFY_SPAWN = os.environ.get("BLAST_VERIFY_SPAWN", "skip")
+
 # ------------------------------------------------------------------ limits
 # Searches of the pinned source for the users of a removed / rebound name, per commit; beyond
 # that the coarser "tests that load the module" is used.
@@ -144,3 +193,5 @@ MAPS_DIR = os.environ.get("BLAST_MAPS", os.path.join(APP_DIR, "maps"))
 SRC_DIR = os.environ.get("BLAST_SRC", "/opt/sqlglot")
 BASE_DIR = os.environ.get("BLAST_BASE", "/opt/blast-base")
 TMP_DIR = os.environ.get("BLAST_TMP", "/tmp")
+# The interpreter that runs sqlglot's tests (blast/runner.py); the selector's own by default.
+RUNNER_PYTHON = os.environ.get("BLAST_RUNNER_PYTHON", "")

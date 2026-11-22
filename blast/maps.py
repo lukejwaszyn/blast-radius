@@ -68,6 +68,7 @@ class Maps:
         self._module_index = None
         self._stmt_index: dict[str, dict] = {}
         self._warm = None
+        self.warm_hits = 0   # times a lookup returned tests that reach code only after other tests
         self._assigned_index: dict[str, set] = {}
 
     # ------------------------------------------------------------- loading
@@ -174,11 +175,35 @@ class Maps:
         lines = self._warm["lines"].get(rel)
         if not lines:
             return 0
+        if lo > hi:
+            return 0
         mask = 0
         for key, sid in lines.items():
             if lo <= int(key) <= hi:
                 mask |= mask_of(self._warm["sets"][sid])
+        if mask or any(r == rel and first <= hi and lo <= last for r, first, last in self.warm_scopes()):
+            self.warm_hits += 1
         return mask
+
+    def warm_scopes(self) -> list[tuple[str, int, int]]:
+        """(file, first, last) of every function holding a line of maps/warm.json: code that is
+        known to take another path once other tests have run in the process.  What a test does
+        there when it runs alone says little about what it does in a full run."""
+        got = self.__dict__.get("_warm_scopes")
+        if got is None:
+            got = []
+            if self._warm is None:
+                self.warm_tests("", 0, 0)
+            for rel, lines in self._warm["lines"].items():
+                info = self.static(rel) or {}
+                for key in lines:
+                    line = int(key)
+                    holding = [(f[4] - f[1], f[1], f[4]) for f in info.get("funcs", ()) if f[6] == "def" and f[1] <= line <= f[4]]
+                    span = (rel, min(holding)[1], min(holding)[2]) if holding else (rel, line, line)
+                    if span not in got:
+                        got.append(span)
+            self.__dict__["_warm_scopes"] = got
+        return got
 
     def import_tests(self, rel: str, lo: int, hi: int) -> int:
         """Tests of the test files whose import executes a line of rel[lo..hi] (filecov.json)."""

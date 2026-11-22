@@ -1,0 +1,470 @@
+{
+"about": "tools/runner_map.py: each test of the pinned commit run alone through blast/runner.py on the unpatched tree (built in the pinned python:3.13-slim image, linux/arm64, with the kit's requirements.lock)",
+"class_setup_s": {
+"tests/dialects/test_druid.py::TestDruid": 0.071,
+"tests/test_executor.py::TestExecutor": 1.394
+},
+"class_starts_process": [
+1293,
+1294,
+1295,
+1296,
+1297,
+1298,
+1299,
+1300,
+1301,
+1302,
+1303,
+1304,
+1305,
+1306,
+1307,
+1308,
+1309,
+1310,
+1311,
+1312,
+1315,
+1316,
+1317,
+1318,
+1319,
+1320,
+1321,
+1322,
+1323,
+1326,
+1328,
+1329,
+1330,
+1331,
+1332,
+1333,
+1334,
+1336,
+1337,
+1338,
+1339,
+1340,
+1341,
+1342,
+1344,
+1345,
+1346,
+1347,
+1348,
+1349,
+1350,
+1351,
+1354,
+1356,
+1357,
+1358,
+1359,
+1360,
+1361,
+1363,
+1364,
+1365,
+1366,
+1367,
+1368,
+1369,
+1370,
+1371,
+1372,
+1373,
+1374,
+1376,
+1379,
+1380,
+1381,
+1383,
+1385,
+1386,
+1387,
+1388,
+1389,
+1390,
+1391,
+1392,
+1393,
+1394,
+1395,
+1396,
+1397,
+1398,
+1399,
+1400,
+1401,
+1402,
+1403,
+1404,
+1405,
+1406,
+1407,
+1408,
+1409,
+1410,
+1411,
+1412,
+1413,
+1414,
+1415,
+1416,
+1418,
+1419,
+1421,
+1422,
+1423,
+1424,
+1425,
+1426,
+1427,
+1428,
+1429,
+1430,
+1431,
+1432,
+1433,
+1435,
+1436,
+1437,
+1438,
+1439,
+1442,
+1443,
+1444,
+1445,
+1446,
+1447,
+1448,
+1449,
+1450,
+1451,
+1452,
+1453,
+1455,
+1456,
+1457,
+1458,
+1459
+],
+"external": {
+"tests/dialects/test_athena.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_bigquery.py": [
+"mypy_extensions",
+"pytz"
+],
+"tests/dialects/test_clickhouse.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_databricks.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_dax.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_dialect.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_doris.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_dremio.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_drill.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_druid.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_duckdb.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_dune.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_exasol.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_fabric.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_hive.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_materialize.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_mysql.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_oracle.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_pipe_syntax.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_postgres.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_presto.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_prql.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_redshift.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_risingwave.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_singlestore.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_snowflake.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_solr.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_spark.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_sqlite.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_starrocks.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_tableau.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_teradata.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_trino.py": [
+"mypy_extensions"
+],
+"tests/dialects/test_tsql.py": [
+"mypy_extensions"
+],
+"tests/test_anonymize.py": [
+"mypy_extensions"
+],
+"tests/test_build.py": [
+"mypy_extensions"
+],
+"tests/test_dialect_entry_points.py": [
+"mypy_extensions"
+],
+"tests/test_dialect_imports.py": [
+"mypy_extensions"
+],
+"tests/test_diff.py": [
+"mypy_extensions"
+],
+"tests/test_errors.py": [
+"mypy_extensions"
+],
+"tests/test_executor.py": [
+"dateutil",
+"duckdb",
+"mypy_extensions",
+"numpy",
+"pandas",
+"pytz"
+],
+"tests/test_expressions.py": [
+"mypy_extensions"
+],
+"tests/test_generator.py": [
+"mypy_extensions"
+],
+"tests/test_helper.py": [
+"mypy_extensions"
+],
+"tests/test_jsonpath.py": [
+"mypy_extensions"
+],
+"tests/test_lineage.py": [
+"mypy_extensions"
+],
+"tests/test_optimize_cross_joins.py": [
+"mypy_extensions"
+],
+"tests/test_optimizer.py": [
+"dateutil",
+"duckdb",
+"mypy_extensions",
+"numpy",
+"pandas",
+"pytz"
+],
+"tests/test_parser.py": [
+"mypy_extensions"
+],
+"tests/test_schema.py": [
+"mypy_extensions"
+],
+"tests/test_serde.py": [
+"mypy_extensions"
+],
+"tests/test_simplify_between.py": [
+"mypy_extensions"
+],
+"tests/test_sqlglotc.py": [
+"distutils",
+"jaraco",
+"more_itertools",
+"packaging",
+"setuptools"
+],
+"tests/test_time.py": [
+"mypy_extensions"
+],
+"tests/test_tokens.py": [
+"mypy_extensions"
+],
+"tests/test_transforms.py": [
+"mypy_extensions"
+],
+"tests/test_transpile.py": [
+"mypy_extensions"
+],
+"tests/test_typing.py": [
+"mypy_extensions"
+]
+},
+"job_overhead_s": 0.095,
+"not_alone": [],
+"not_run_long": [
+1106,
+1224,
+1490
+],
+"preload": [
+"abc",
+"argparse",
+"ast",
+"binascii",
+"bisect",
+"bz2",
+"codecs",
+"collections",
+"collections.abc",
+"contextlib",
+"copy",
+"copyreg",
+"dataclasses",
+"datetime",
+"decimal",
+"difflib",
+"dis",
+"email",
+"encodings",
+"encodings.aliases",
+"encodings.utf_8",
+"encodings.utf_8_sig",
+"enum",
+"fnmatch",
+"fractions",
+"functools",
+"genericpath",
+"gettext",
+"glob",
+"grp",
+"heapq",
+"importlib",
+"importlib.abc",
+"importlib.machinery",
+"importlib.metadata",
+"importlib.resources",
+"importlib.resources.abc",
+"importlib.util",
+"inspect",
+"io",
+"json",
+"json.decoder",
+"json.encoder",
+"json.scanner",
+"keyword",
+"linecache",
+"logging",
+"lzma",
+"math",
+"ntpath",
+"numbers",
+"opcode",
+"operator",
+"os",
+"os.path",
+"pathlib",
+"posixpath",
+"pprint",
+"random",
+"re",
+"reprlib",
+"shutil",
+"signal",
+"site",
+"stat",
+"string",
+"struct",
+"sysconfig",
+"tempfile",
+"textwrap",
+"threading",
+"token",
+"tokenize",
+"traceback",
+"types",
+"typing",
+"unittest",
+"unittest.case",
+"unittest.loader",
+"unittest.main",
+"unittest.result",
+"unittest.runner",
+"unittest.signals",
+"unittest.suite",
+"unittest.util",
+"warnings",
+"weakref",
+"zipfile",
+"zipimport",
+"zlib"
+],
+"starts_process": [
+214,
+1107,
+1313,
+1314,
+1324,
+1325,
+1327,
+1335,
+1343,
+1352,
+1353,
+1355,
+1362,
+1375,
+1377,
+1378,
+1382,
+1384,
+1417,
+1420,
+1434,
+1440,
+1441,
+1454
+]
+}

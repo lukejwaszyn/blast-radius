@@ -257,6 +257,43 @@ recording, the importing ones included, ever saw a difference).
 Built like the other per-test maps (fork per test, two hash seeds united);
 see `tools/README.md`.
 
+### runner.json — what the decision-time runner may judge
+
+```json
+{"not_alone": [], "starts_process": [214, 1105, ...], "class_starts_process": [...], "not_run_long": [1106, 1156, 1512],
+ "job_overhead_s": 0.095, "class_setup_s": {"tests/test_executor.py::TestExecutor": 1.394, ...},
+ "external": {"tests/test_optimizer.py": ["duckdb", "numpy", "pandas", ...], ...}, "preload": ["abc", "argparse", ...]}
+```
+
+Made by `tools/runner_map.py`: every test of the pinned commit run **alone**,
+on the unpatched tree, through `blast/runner.py` itself (the same zygote, the
+same fresh import, `unittest` not pytest), in the kit's pinned Python image
+with the kit's `requirements.lock` (linux/arm64). A native macOS run gave the
+same lists.
+
+- `not_alone`: tests that do not pass alone. Empty: all 1617 run tests pass.
+- `starts_process`: tests that start another process while they run: the 22
+  optimizer tests that submit work to the class's `spawn` process pool,
+  `test_execute_tpch` (its own pool) and `test_lazy_load` (`python -c`). Every
+  pool worker is a new interpreter that imports sqlglot, pandas and duckdb:
+  `test_eliminate_ctes` is recorded at 0.006 s and costs 1.9 s of CPU alone.
+- `class_starts_process`: the other 145 `TestOptimizer` tests; creating the
+  pool in `setUpClass` starts multiprocessing's resource tracker, nothing
+  else. Informative only.
+- `not_run_long`: the three tests above 5 s; the tool does not run them.
+- `job_overhead_s`: median CPU of a one-test job beyond the test's recorded
+  duration (fork, fresh import of sqlglot and the test file).
+  `class_setup_s`: what a class adds to that when it is above 0.05 s
+  (`TestExecutor.setUpClass` loads the TPC-H tables).
+- `external`: third-party packages loaded once a test file is imported.
+  `preload`: standard library modules at least half of the test files load.
+
+Use (`blast/verify.py`): a commit whose candidates include a test of
+`not_alone`, `starts_process` or `not_run_long` is not run at all (dropping
+the others would not close the worker); the timings price a run before it is
+decided; the zygote imports `preload` once, and numpy / pandas / duckdb when a
+candidate's file lists them.
+
 ## From a patch to candidate tests
 
 The order in which `tools/verify_samples.py` consults the maps (it is a checker,
