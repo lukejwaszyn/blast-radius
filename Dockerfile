@@ -30,4 +30,7 @@ RUN python -m compileall -q /opt/sqlglot/sqlglot /opt/sqlglot/tests /app/blast /
  && chmod -R a+rX /app /opt/sqlglot /opt/blast-base \
  && python /app/tools/check_image.py /opt/sqlglot /app/maps /app/selector.py
 
+# Comparison variant: no tests are run at decision time.
+ENV BLAST_VERIFY=off
+
 CMD ["python", "-S", "/app/selector.py"]
